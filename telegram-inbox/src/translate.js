@@ -5,9 +5,13 @@ const PROVIDER_SETTING = "translate_provider";
 const DEFAULT_TARGET = "zh-CN";
 
 const PROVIDERS = [
-  { code: "google", label: "Google Cloud Translation API（官方，需要 Key）" },
-  { code: "google-web", label: "translate.googleapis.com（非官方备用，无需 Key）" }
+  { code: "google", label: "Google Cloud Translation API（官方，需要 Key）", requiresKey: true },
+  { code: "google-web", label: "Google 网页翻译 · translate.googleapis.com（无需 Key）" },
+  { code: "google-web-main", label: "Google 网页翻译 · translate.google.com（无需 Key）" },
+  { code: "google-chrome", label: "Google Chrome 翻译接口（无需 Key）" },
+  { code: "mymemory", label: "MyMemory 免费翻译（无需 Key，有额度限制）" }
 ];
+const PROVIDER_CODES = new Set(PROVIDERS.map(item => item.code));
 
 const LANGUAGES = [
   { code: "zh-CN", label: "中文（简体）" },
@@ -57,7 +61,20 @@ function languageLabel(code) {
 
 function normalizeProvider(value) {
   const raw = String(value || "").trim().toLowerCase();
-  return ["google-web", "web", "unofficial"].includes(raw) ? "google-web" : "google";
+  const aliases = {
+    web: "google-web",
+    unofficial: "google-web",
+    "google-web-main": "google-web-main",
+    "google-main": "google-web-main",
+    chrome: "google-chrome",
+    "google-chrome": "google-chrome",
+    mymemory: "mymemory"
+  };
+  return PROVIDER_CODES.has(raw) ? raw : aliases[raw] || "google";
+}
+
+function providerRequiresKey(code) {
+  return normalizeProvider(code) === "google";
 }
 
 function providerLabel(code) {
@@ -91,6 +108,15 @@ function createTranslateService({ db, config = {}, logger } = {}) {
   const webApiBase = String(
     config.googleTranslateWebApiBase || "https://translate.googleapis.com"
   ).replace(/\/+$/, "");
+  const webMainApiBase = String(
+    config.googleTranslateWebMainApiBase || "https://translate.google.com"
+  ).replace(/\/+$/, "");
+  const chromeApiBase = String(
+    config.googleTranslateChromeApiBase || "https://clients5.google.com"
+  ).replace(/\/+$/, "");
+  const myMemoryApiBase = String(
+    config.myMemoryApiBase || "https://api.mymemory.translated.net"
+  ).replace(/\/+$/, "");
   const envProvider = normalizeProvider(config.translateProvider || "google");
   const defaultTarget = normalizeLanguage(config.translateTarget || DEFAULT_TARGET);
   const timeoutMs = Math.min(Math.max(Number(config.translateTimeoutMs) || 10000, 1000), 30000);
@@ -109,7 +135,7 @@ function createTranslateService({ db, config = {}, logger } = {}) {
   }
 
   function configured() {
-    if (currentProvider() === "google-web") return true;
+    if (!providerRequiresKey(currentProvider())) return true;
     return Boolean(currentKey());
   }
 
@@ -121,6 +147,7 @@ function createTranslateService({ db, config = {}, logger } = {}) {
       source: dbKey ? "database" : envKey ? "environment" : "none",
       provider,
       providerLabel: providerLabel(provider),
+      requiresKey: providerRequiresKey(provider),
       keyConfigured: Boolean(dbKey || envKey),
       providers: PROVIDERS,
       defaultTarget,
@@ -147,7 +174,7 @@ function createTranslateService({ db, config = {}, logger } = {}) {
     db.prepare("DELETE FROM settings WHERE key = ?").run(API_KEY_SETTING);
   }
 
-  async function webRequest(text, target, source = "auto") {
+  async function webRequest(text, target, source = "auto", base = webApiBase) {
     const targetLanguage = normalizeLanguage(target);
     if (targetLanguage === "auto") {
       throw new TranslationError("请选择目标语言", "INVALID_LANGUAGE");
@@ -161,7 +188,7 @@ function createTranslateService({ db, config = {}, logger } = {}) {
     });
     let response;
     try {
-      response = await fetch(`${webApiBase}/translate_a/single?${params.toString()}`, {
+      response = await fetch(`${base}/translate_a/single?${params.toString()}`, {
         headers: { "user-agent": "Mozilla/5.0" },
         signal: AbortSignal.timeout(timeoutMs)
       });
@@ -232,10 +259,143 @@ function createTranslateService({ db, config = {}, logger } = {}) {
     return data;
   }
 
+  function splitMyMemoryText(value, max = 480) {
+    const text = String(value || "");
+    const chunks = [];
+    let remaining = text;
+    while (remaining.length > max) {
+      const candidates = [
+        remaining.lastIndexOf("\n", max),
+        remaining.lastIndexOf("。", max),
+        remaining.lastIndexOf(". ", max),
+        remaining.lastIndexOf(" ", max)
+      ];
+      let cut = Math.max(...candidates);
+      if (cut < Math.floor(max * 0.4)) cut = max;
+      chunks.push(remaining.slice(0, cut + 1));
+      remaining = remaining.slice(cut + 1);
+    }
+    if (remaining) chunks.push(remaining);
+    return chunks;
+  }
+
+  async function myMemoryChunk(text, target, source) {
+    const params = new URLSearchParams({
+      q: String(text || ""),
+      langpair: `${source === "auto" ? "Autodetect" : normalizeLanguage(source)}|${target}`
+    });
+    let response;
+    try {
+      response = await fetch(`${myMemoryApiBase}/get?${params.toString()}`, {
+        headers: { "user-agent": "Mozilla/5.0" },
+        signal: AbortSignal.timeout(timeoutMs)
+      });
+    } catch (error) {
+      logger?.warn("MyMemory 翻译请求失败", error.message);
+      throw new TranslationError("无法连接 MyMemory 翻译服务", "TRANSLATION_NETWORK");
+    }
+
+    let data = null;
+    try {
+      data = await response.json();
+    } catch {}
+    const status = Number(data?.responseStatus || 0);
+    const translated = String(data?.responseData?.translatedText || "");
+    if (/PLEASE SELECT TWO DISTINCT LANGUAGES/i.test(translated)) {
+      const detected = source === "auto" ? target : source;
+      return {
+        text: String(text || ""),
+        detectedLanguage: normalizeLanguage(detected),
+        targetLanguage: target
+      };
+    }
+    if (!response.ok || status !== 200 || !translated) {
+      if (/QUERY LENGTH LIMIT|INVALID SOURCE/i.test(translated)) {
+        throw new TranslationError("MyMemory 翻译请求参数无效", "TRANSLATION_ERROR");
+      }
+      if (data?.quotaFinished) {
+        throw new TranslationError("MyMemory 免费额度已用完，请切换其他翻译通道", "TRANSLATION_ERROR");
+      }
+      throw new TranslationError(
+        `MyMemory 翻译请求失败（HTTP ${response.status}）`,
+        "TRANSLATION_ERROR"
+      );
+    }
+    return {
+      text: decodeEntities(translated),
+      detectedLanguage: normalizeLanguage(
+        data?.responseData?.detectedLanguage || data?.matches?.[0]?.source || source || "auto"
+      ),
+      targetLanguage: target
+    };
+  }
+
+  async function myMemoryRequest(text, target, source = "auto") {
+    const chunks = splitMyMemoryText(text);
+    let detectedLanguage = "auto";
+    const parts = [];
+    for (const chunk of chunks) {
+      const result = await myMemoryChunk(chunk, target, source);
+      if (detectedLanguage === "auto" && result.detectedLanguage !== "auto") {
+        detectedLanguage = result.detectedLanguage;
+      }
+      parts.push(result.text);
+    }
+    return {
+      text: parts.join(""),
+      detectedLanguage,
+      targetLanguage: target
+    };
+  }
+
+  async function chromeRequest(text, target, source = "auto") {
+    const params = new URLSearchParams({
+      client: "dict-chrome-ex",
+      sl: normalizeLanguage(source),
+      tl: target,
+      q: String(text || "").slice(0, 10000)
+    });
+    let response;
+    try {
+      response = await fetch(`${chromeApiBase}/translate_a/t?${params.toString()}`, {
+        headers: { "user-agent": "Mozilla/5.0" },
+        signal: AbortSignal.timeout(timeoutMs)
+      });
+    } catch (error) {
+      logger?.warn("Google Chrome 翻译请求失败", error.message);
+      throw new TranslationError("无法连接 Google Chrome 翻译服务", "TRANSLATION_NETWORK");
+    }
+
+    let data = null;
+    try {
+      data = await response.json();
+    } catch {}
+    if (!response.ok || !Array.isArray(data)) {
+      throw new TranslationError(
+        `Google Chrome 翻译请求失败（HTTP ${response.status}）`,
+        "TRANSLATION_ERROR"
+      );
+    }
+    const translated = data
+      .map(item => Array.isArray(item) ? item[0] : typeof item === "string" ? item : "")
+      .filter(Boolean)
+      .join("");
+    if (!translated) {
+      throw new TranslationError("Google Chrome 翻译返回为空", "TRANSLATION_ERROR");
+    }
+    return {
+      text: decodeEntities(translated),
+      detectedLanguage: normalizeLanguage(
+        (Array.isArray(data[0]) ? data[0][1] : null) || source || "auto"
+      ),
+      targetLanguage: target
+    };
+  }
+
   async function detect(text) {
-    if (currentProvider() === "google-web") {
-      const result = await webRequest(text, "en");
-      return { language: result.detectedLanguage, confidence: 1 };
+    if (!providerRequiresKey(currentProvider())) {
+      const result = await translate(text, "en", "auto");
+      return { language: result.detectedLanguage || "auto", confidence: 1 };
     }
     const data = await request("/language/translate/v2/detect", {
       q: String(text || "").slice(0, 10000),
@@ -253,8 +413,18 @@ function createTranslateService({ db, config = {}, logger } = {}) {
     if (targetLanguage === "auto") {
       throw new TranslationError("请选择目标语言", "INVALID_LANGUAGE");
     }
-    if (currentProvider() === "google-web") {
+    const provider = currentProvider();
+    if (provider === "google-web") {
       return webRequest(text, targetLanguage, sourceLanguage);
+    }
+    if (provider === "google-web-main") {
+      return webRequest(text, targetLanguage, sourceLanguage, webMainApiBase);
+    }
+    if (provider === "google-chrome") {
+      return chromeRequest(text, targetLanguage, sourceLanguage);
+    }
+    if (provider === "mymemory") {
+      return myMemoryRequest(text, targetLanguage, sourceLanguage);
     }
     const payload = {
       q: String(text || ""),
@@ -374,6 +544,7 @@ module.exports = {
   PROVIDERS,
   languageLabel,
   normalizeProvider,
+  providerRequiresKey,
   providerLabel,
   normalizeLanguage,
   sameLanguage,

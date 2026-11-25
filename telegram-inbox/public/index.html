@@ -559,7 +559,7 @@
       <div class="channel-status" id="translateStatus">
         <span class="channel-dot" id="translateDot" aria-hidden="true"></span>
         <div>
-          <strong>Google 翻译</strong>
+          <strong>翻译服务</strong>
           <span id="translateStatusText">正在检查配置…</span>
         </div>
       </div>
@@ -569,10 +569,13 @@
           翻译通道
           <select id="translateProvider">
             <option value="google">Google Cloud Translation API（官方，需要 Key）</option>
-            <option value="google-web">translate.googleapis.com（非官方备用，无需 Key）</option>
+            <option value="google-web">Google 网页翻译 · translate.googleapis.com（无需 Key）</option>
+            <option value="google-web-main">Google 网页翻译 · translate.google.com（无需 Key）</option>
+            <option value="google-chrome">Google Chrome 翻译接口（无需 Key）</option>
+            <option value="mymemory">MyMemory 免费翻译（无需 Key，有额度限制）</option>
           </select>
         </label>
-        <label>
+        <label id="translateKeyLabel">
           Google Cloud Translation API Key
           <input
             id="translateKeyInput"
@@ -583,7 +586,7 @@
             maxlength="200"
           >
         </label>
-        <p class="channel-note">官方 API 需要 Key，保存前会验证。备用通道直接调用 translate.googleapis.com，无需 Key，但不是 Google 官方 API，可能限流或失效，仅建议测试使用。Key 只保存在服务器数据库，不会回显到页面。</p>
+        <p class="channel-note">官方 API 需要 Key，保存前会验证。其余通道均无需 Key：Google 网页翻译、Chrome 翻译接口、MyMemory。它们都不是 Google 官方 API，可能限流或失效；MyMemory 单次最多约 500 字符，适合作为备用。</p>
         <div class="channel-actions">
           <button class="primary" type="submit" id="translateSaveBtn">验证并保存</button>
           <button class="ghost" type="button" id="translateClearBtn" hidden>清除 Key</button>
@@ -591,9 +594,9 @@
         <div id="translateError" class="form-error" hidden></div>
       </form>
 
-      <div class="channel-help">
+      <div class="channel-help" id="translateKeyHelp">
         <strong>怎么获取 Key？</strong>
-        <p>在 Google Cloud Console 启用 Cloud Translation API，创建 API Key 后填入这里。Key 仅用于服务端调用，不会发送到浏览器。没有 Key 时可先切换到非官方备用通道测试。</p>
+        <p>在 Google Cloud Console 启用 Cloud Translation API，创建 API Key 后填入这里。Key 仅用于服务端调用，不会发送到浏览器。没有 Key 时可在上方切换任意一个免费备用通道。</p>
       </div>
     </div>
   </div>

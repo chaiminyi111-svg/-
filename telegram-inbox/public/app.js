@@ -1779,14 +1779,14 @@ function renderTranslateSettings() {
   const settings = state.channels.translate || state.translate || {};
   const configured = Boolean(settings.configured);
   const provider = settings.provider || "google";
-  const web = provider === "google-web";
+  const requiresKey = settings.requiresKey ?? provider === "google";
   $("#translateDot").className = "channel-dot " + (configured ? "on" : "off");
   $("#translateProvider").value = provider;
   let text;
   if (!configured) {
     text = "未配置，填写 Google Cloud Translation API Key 后启用";
-  } else if (web) {
-    text = "已启用 · 非官方备用通道（无需 Key）";
+  } else if (!requiresKey) {
+    text = `已启用 · ${settings.providerLabel || "免费翻译通道"}`;
   } else {
     text = "已启用，会自动识别客户语言并翻译外文消息";
     if (settings.source === "environment") text += " · 来自环境变量";
@@ -1794,16 +1794,21 @@ function renderTranslateSettings() {
   }
   $("#translateStatusText").textContent = text;
   $("#translateClearBtn").hidden = !settings.keyConfigured || settings.source === "environment";
+  $("#translateKeyLabel").hidden = !requiresKey;
+  $("#translateKeyHelp").hidden = !requiresKey;
+  $("#translateKeyInput").disabled = !requiresKey;
+  $("#translateSaveBtn").hidden = !requiresKey;
   $("#translateKeyInput").placeholder = settings.keyConfigured
     ? "已配置，留空保持不变"
-    : web
-      ? "当前使用备用通道；切换官方 API 时再填写"
-      : "AIza...（需要启用 Cloud Translation API）";
+    : requiresKey
+      ? "AIza...（需要启用 Cloud Translation API）"
+      : "当前通道无需 Key；切换官方 API 时再填写";
 }
 
 async function saveTranslateProvider() {
   const select = $("#translateProvider");
   const provider = select.value;
+  if (!provider) return;
   select.disabled = true;
   setChannelError("translateError", "");
   try {
@@ -1815,9 +1820,15 @@ async function saveTranslateProvider() {
     state.translate = { ...state.translate, ...data.translate };
     renderChannelSettings();
     if (state.active) renderChatHeader();
-    showToast(provider === "google-web" ? "已切换到非官方备用翻译通道" : "已切换到官方翻译 API", "success");
+    showToast(
+      provider === "google"
+        ? "已切换到官方翻译 API"
+        : `已切换到 ${data.translate?.providerLabel || "免费翻译通道"}`,
+      "success"
+    );
   } catch (error) {
     setChannelError("translateError", error.message);
+    renderTranslateSettings();
   } finally {
     select.disabled = false;
   }
@@ -2005,6 +2016,11 @@ async function clearWhatsAppCredentials() {
 
 async function saveTranslateKey(event) {
   event.preventDefault();
+  const provider = $("#translateProvider").value;
+  if (provider !== "google") {
+    setChannelError("translateError", "当前通道无需 API Key，可直接使用");
+    return;
+  }
   const apiKey = $("#translateKeyInput").value.trim();
   if (!apiKey) {
     setChannelError("translateError", "请输入 Google 翻译 API Key");
@@ -2035,10 +2051,10 @@ async function saveTranslateKey(event) {
 }
 
 async function clearTranslateKey() {
-  const web = state.channels.translate?.provider === "google-web";
-  const message = web
-    ? "确定清除官方 Google 翻译 API Key？当前使用备用通道，清除后仍会继续翻译。"
-    : "确定清除 Google 翻译 API Key？清除后将停止自动识别和翻译。";
+  const requiresKey = state.channels.translate?.requiresKey ?? state.channels.translate?.provider === "google";
+  const message = requiresKey
+    ? "确定清除 Google 翻译 API Key？清除后将停止自动识别和翻译。"
+    : "确定清除官方 Google 翻译 API Key？当前使用免费通道，清除后仍会继续翻译。";
   if (!window.confirm(message)) return;
 
   const button = $("#translateClearBtn");

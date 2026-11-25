@@ -149,6 +149,39 @@ function startMockTranslate() {
       return;
     }
 
+    if (url.pathname.endsWith("/translate_a/t")) {
+      const text = String(url.searchParams.get("q") || "");
+      const target = String(url.searchParams.get("tl") || "en");
+      const language = /[\u4e00-\u9fff]/.test(text) ? "zh-CN"
+        : text.toLowerCase().includes("bonjour") ? "fr" : "en";
+      let translatedText = text;
+      if (target === "zh-CN") translatedText = "你好";
+      else if (target === "en") translatedText = "Hello";
+      else if (target === "ja") translatedText = "こんにちは";
+      res.setHeader("content-type", "application/json");
+      res.end(JSON.stringify([[translatedText, language]]));
+      return;
+    }
+
+    if (url.pathname.endsWith("/get")) {
+      const text = String(url.searchParams.get("q") || "");
+      const pair = String(url.searchParams.get("langpair") || "Autodetect|en").split("|");
+      const target = pair[1] || "en";
+      const language = /[\u4e00-\u9fff]/.test(text) ? "zh-CN"
+        : text.toLowerCase().includes("bonjour") ? "fr" : "en";
+      let translatedText = text;
+      if (target === "zh-CN") translatedText = "你好";
+      else if (target === "en") translatedText = "Hello";
+      else if (target === "ja") translatedText = "こんにちは";
+      res.setHeader("content-type", "application/json");
+      res.end(JSON.stringify({
+        responseData: { translatedText, detectedLanguage: language },
+        responseStatus: 200,
+        quotaFinished: false
+      }));
+      return;
+    }
+
     if (url.pathname.endsWith("/language/translate/v2/detect")) {
       const text = String(payload.q || "");
       const language = /[\u4e00-\u9fff]/.test(text) ? "zh-CN"
@@ -1401,6 +1434,9 @@ test("Google translation detects language and translates replies", async t => {
     googleTranslateApiKey: "",
     googleTranslateApiBase: translateMock.base,
     googleTranslateWebApiBase: translateMock.base,
+    googleTranslateWebMainApiBase: translateMock.base,
+    googleTranslateChromeApiBase: translateMock.base,
+    myMemoryApiBase: translateMock.base,
     translateProvider: "google",
     translateTarget: "zh-CN"
   };
@@ -1511,6 +1547,33 @@ test("Google translation detects language and translates replies", async t => {
   const webOutbound = await translate.prepareOutbound("你好", "en");
   assert.equal(webOutbound.text, "Hello");
   assert.equal(webOutbound.meta.translated, true);
+
+  for (const provider of ["google-web-main", "google-chrome", "mymemory"]) {
+    const switched = await apiRequest(base, "/api/admin/translate", {
+      method: "POST",
+      cookie: adminCookie,
+      body: { provider }
+    });
+    assert.equal(switched.response.status, 200, JSON.stringify(switched.data));
+    assert.equal(switched.data.translate.provider, provider);
+    assert.equal(switched.data.translate.configured, true);
+    assert.equal(switched.data.translate.keyConfigured, false);
+    assert.ok(switched.data.translate.providerLabel);
+
+    const inbound = await translate.translateInbound("Hello");
+    assert.equal(inbound.language, "en", provider);
+    assert.equal(inbound.translatedBody, "你好", provider);
+    const outbound = await translate.prepareOutbound("你好", "en");
+    assert.equal(outbound.text, "Hello", provider);
+    assert.equal(outbound.meta.translated, true, provider);
+  }
+
+  const providers = (await apiRequest(base, "/api/admin/translate", { cookie: adminCookie }))
+    .data.translate.providers;
+  assert.equal(providers.length, 5);
+  assert.deepEqual(providers.map(item => item.code), [
+    "google", "google-web", "google-web-main", "google-chrome", "mymemory"
+  ]);
 });
 
 
