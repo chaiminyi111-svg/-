@@ -4070,6 +4070,176 @@ app.post("/api/admin/users/:id/red-wallet/grant", async (c) => {
   ).bind(userId).first();
   return c.json({ ok: true, balanceCents: Number(wallet?.balance_cents || 0) });
 });
+
+const CLOUDCHAT_MESSAGE_FIELDS = `m.id,m.sender_id,m.body,m.message_type,m.created_at,m.recalled_at,m.forwarded_from,m.reply_to,
+       u.display_name AS sender_display_name,
+       u.avatar_url AS sender_avatar_url,
+       re.total_cents AS red_total_cents,
+       re.remaining_cents AS red_remaining_cents,
+       re.total_count AS red_total_count,
+       re.remaining_count AS red_remaining_count,
+       re.envelope_type AS red_envelope_type,
+       re.greeting AS red_greeting,
+       re.status AS red_status,
+       re.expires_at AS red_expires_at,
+       re.sender_id AS red_sender_id,
+       a.mime_type AS image_mime_type,
+       a.file_name AS image_file_name,
+       a.file_size AS image_file_size,
+       a.duration_ms AS duration_ms,
+       CASE WHEN m.sender_id=? AND EXISTS (
+         SELECT 1 FROM conversation_reads cr
+         WHERE cr.conversation_id=m.conversation_id
+           AND cr.user_id<>?
+           AND cr.last_read_at >= m.created_at
+       ) THEN 1 ELSE 0 END AS is_read`;
+
+const CLOUDCHAT_MESSAGE_FROM = `FROM messages m
+     JOIN users u ON u.id=m.sender_id
+     LEFT JOIN message_attachments a ON a.message_id=m.id
+     LEFT JOIN red_envelopes re
+       ON re.id=m.body AND m.message_type='red_envelope'`;
+
+app.get("/api/conversations/:id/messages/older", async (c) => {
+  const user = c.get("user"), id = c.req.param("id");
+  const before = String(c.req.query("before") || "").slice(0, 40);
+  if (!before) return jsonError(c, 400, "缺少时间参数");
+  const member = await c.env.DB.prepare(
+    "SELECT 1 FROM conversation_members WHERE conversation_id=? AND user_id=?"
+  ).bind(id, user.id).first();
+  if (!member) return jsonError(c, 403, "无权查看该会话");
+  const rows = await c.env.DB.prepare(
+    `SELECT ${CLOUDCHAT_MESSAGE_FIELDS}
+     ${CLOUDCHAT_MESSAGE_FROM}
+     WHERE m.conversation_id=?
+       AND m.created_at < ?
+       AND NOT EXISTS (
+         SELECT 1 FROM message_deletions md
+         WHERE md.message_id=m.id AND md.user_id=?
+       )
+     ORDER BY m.created_at DESC LIMIT 51`
+  ).bind(user.id, user.id, id, before, user.id).all();
+  const list = rows.results || [];
+  return c.json({ messages: list.slice(0, 50).reverse(), hasMore: list.length > 50 });
+});
+
+app.get("/api/conversations/:id/messages/context", async (c) => {
+  const user = c.get("user"), id = c.req.param("id");
+  const messageId = String(c.req.query("messageId") || "").slice(0, 100);
+  if (!messageId) return jsonError(c, 400, "缺少消息参数");
+  const member = await c.env.DB.prepare(
+    "SELECT 1 FROM conversation_members WHERE conversation_id=? AND user_id=?"
+  ).bind(id, user.id).first();
+  if (!member) return jsonError(c, 403, "无权查看该会话");
+  const target = await c.env.DB.prepare(
+    "SELECT created_at FROM messages WHERE id=? AND conversation_id=?"
+  ).bind(messageId, id).first();
+  if (!target) return jsonError(c, 404, "消息不存在");
+  const olderRows = await c.env.DB.prepare(
+    `SELECT ${CLOUDCHAT_MESSAGE_FIELDS}
+     ${CLOUDCHAT_MESSAGE_FROM}
+     WHERE m.conversation_id=?
+       AND m.created_at <= ?
+       AND NOT EXISTS (
+         SELECT 1 FROM message_deletions md
+         WHERE md.message_id=m.id AND md.user_id=?
+       )
+     ORDER BY m.created_at DESC LIMIT 26`
+  ).bind(user.id, user.id, id, target.created_at, user.id).all();
+  const newerRows = await c.env.DB.prepare(
+    `SELECT ${CLOUDCHAT_MESSAGE_FIELDS}
+     ${CLOUDCHAT_MESSAGE_FROM}
+     WHERE m.conversation_id=?
+       AND m.created_at > ?
+       AND NOT EXISTS (
+         SELECT 1 FROM message_deletions md
+         WHERE md.message_id=m.id AND md.user_id=?
+       )
+     ORDER BY m.created_at ASC LIMIT 24`
+  ).bind(user.id, user.id, id, target.created_at, user.id).all();
+  const older = olderRows.results || [];
+  return c.json({
+    messages: older.slice(0, 25).reverse().concat(newerRows.results || []),
+    hasMore: older.length > 25,
+    context: true
+  });
+});
+
+app.get("/api/conversations/:id/messages/search", async (c) => {
+  const user = c.get("user"), id = c.req.param("id");
+  const q = String(c.req.query("q") || "").trim().slice(0, 100);
+  if (!q) return c.json({ messages: [] });
+  const member = await c.env.DB.prepare(
+    "SELECT 1 FROM conversation_members WHERE conversation_id=? AND user_id=?"
+  ).bind(id, user.id).first();
+  if (!member) return jsonError(c, 403, "无权查看该会话");
+  const pattern = "%" + q.replace(/[\\%_]/g, ch => "\\" + ch) + "%";
+  const rows = await c.env.DB.prepare(
+    `SELECT m.id,m.sender_id,m.body,m.message_type,m.created_at,m.recalled_at,
+       u.display_name AS sender_display_name,
+       a.file_name AS file_name
+     FROM messages m
+     JOIN users u ON u.id=m.sender_id
+     LEFT JOIN message_attachments a ON a.message_id=m.id
+     WHERE m.conversation_id=?
+       AND m.recalled_at IS NULL
+       AND (m.body LIKE ? ESCAPE '\\' OR a.file_name LIKE ? ESCAPE '\\')
+       AND NOT EXISTS (
+         SELECT 1 FROM message_deletions md
+         WHERE md.message_id=m.id AND md.user_id=?
+       )
+     ORDER BY m.created_at DESC LIMIT 50`
+  ).bind(id, pattern, pattern, user.id).all();
+  return c.json({ messages: rows.results || [] });
+});
+
+app.get("/api/conversations/:id/attachments", async (c) => {
+  const user = c.get("user"), id = c.req.param("id");
+  const member = await c.env.DB.prepare(
+    "SELECT 1 FROM conversation_members WHERE conversation_id=? AND user_id=?"
+  ).bind(id, user.id).first();
+  if (!member) return jsonError(c, 403, "无权查看该会话");
+  const rows = await c.env.DB.prepare(
+    `SELECT m.id,m.sender_id,m.message_type,m.created_at,m.body,
+       u.display_name AS sender_display_name,
+       a.file_name,a.file_size,a.mime_type,a.duration_ms
+     FROM messages m
+     JOIN users u ON u.id=m.sender_id
+     JOIN message_attachments a ON a.message_id=m.id
+     WHERE m.conversation_id=?
+       AND m.recalled_at IS NULL
+       AND m.message_type IN ('image','file','voice')
+       AND NOT EXISTS (
+         SELECT 1 FROM message_deletions md
+         WHERE md.message_id=m.id AND md.user_id=?
+       )
+     ORDER BY m.created_at DESC LIMIT 200`
+  ).bind(id, user.id).all();
+  return c.json({ attachments: rows.results || [] });
+});
+
+app.get("/api/conversations/:id/group-info", async (c) => {
+  const user = c.get("user"), id = c.req.param("id");
+  const group = await c.env.DB.prepare(
+    "SELECT name,owner_id,announcement FROM conversation_groups WHERE conversation_id=?"
+  ).bind(id).first();
+  if (!group) return jsonError(c, 404, "群聊不存在");
+  const member = await c.env.DB.prepare(
+    "SELECT 1 FROM conversation_members WHERE conversation_id=? AND user_id=?"
+  ).bind(id, user.id).first();
+  if (!member) return jsonError(c, 403, "不是群成员");
+  const count = await c.env.DB.prepare(
+    "SELECT COUNT(*) AS c FROM conversation_members WHERE conversation_id=?"
+  ).bind(id).first();
+  return c.json({
+    ok: true,
+    name: group.name,
+    announcement: group.announcement || "",
+    ownerId: group.owner_id,
+    memberCount: Number(count?.c || 0)
+  });
+});
+
 app.get("/api/conversations/:id/messages", async (c) => {
   const user = c.get("user"), id = c.req.param("id");
   const member = await c.env.DB.prepare("SELECT 1 FROM conversation_members WHERE conversation_id=? AND user_id=?").bind(id, user.id).first();

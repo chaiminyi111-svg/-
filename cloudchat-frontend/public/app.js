@@ -26,6 +26,11 @@ let contactsLoading = false;
 let messageRefreshTimer = null;
 let messagesLoading = false;
 const messageCache = new Map();
+const groupMetaCache = new Map();
+let messageContextMode = false;
+let oldestLoadedAt = null;
+let hasOlderMessages = true;
+let loadingOlderMessages = false;
 let messageCacheConversation = null;
 let replyTarget = null;
 let conversationOpenSequence = 0;
@@ -39,6 +44,72 @@ let notificationBaselineReady = false;
 const knownLastMessageIds = new Map();
 let notificationAudioContext = null;
 let notificationPermissionRequested = false;
+
+const NOTIFICATION_SETTINGS_KEY = "cloudchat.notificationSettings.v1";
+function loadNotificationSettings() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(NOTIFICATION_SETTINGS_KEY) || "{}");
+    return {
+      desktop: raw.desktop !== false,
+      sound: raw.sound !== false,
+      dnd: raw.dnd === true
+    };
+  } catch {
+    return { desktop: true, sound: true, dnd: false };
+  }
+}
+let notificationSettings = loadNotificationSettings();
+function saveNotificationSettings() {
+  try {
+    localStorage.setItem(NOTIFICATION_SETTINGS_KEY, JSON.stringify(notificationSettings));
+  } catch {}
+}
+
+function mentionNamesForMe() {
+  if (!me) return [];
+  return [me.displayName, me.username].filter(Boolean).map(String);
+}
+
+function textMentionsMe(text) {
+  const value = String(text || "");
+  if (!value) return false;
+  return mentionNamesForMe().some(name => value.includes("@" + name));
+}
+
+function escapeRegExp(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function renderMessageText(container, text) {
+  const value = String(text || "");
+  const names = mentionNamesForMe().sort((a, b) => b.length - a.length);
+  const regex = names.length
+    ? new RegExp("(@(?:" + names.map(escapeRegExp).join("|") + ")|@[^\\s@]+)", "g")
+    : /(@[^\s@]+)/g;
+  let lastIndex = 0;
+  let match;
+
+  while ((match = regex.exec(value))) {
+    if (match.index > lastIndex) {
+      container.appendChild(document.createTextNode(value.slice(lastIndex, match.index)));
+    }
+    const token = match[1];
+    const span = document.createElement("span");
+    span.className = "mention-token";
+    if (names.some(name => token === "@" + name)) {
+      span.classList.add("mention-me");
+      container.classList.add("has-mention-me");
+    }
+    span.textContent = token;
+    container.appendChild(span);
+    lastIndex = regex.lastIndex;
+  }
+
+  if (lastIndex < value.length) {
+    container.appendChild(document.createTextNode(value.slice(lastIndex)));
+  }
+  if (textMentionsMe(value)) container.classList.add("has-mention-me");
+}
 
 function unlockNotificationAudio() {
   const AudioContextClass = window.AudioContext || window.webkitAudioContext;
@@ -56,7 +127,8 @@ function unlockNotificationAudio() {
   }
 }
 
-async function playNotificationSound() {
+async function playNotificationSound(urgent = false) {
+  if (notificationSettings.dnd || !notificationSettings.sound) return;
   if (!notificationAudioContext) return;
 
   try {
@@ -80,17 +152,24 @@ async function playNotificationSound() {
     const now = ctx.currentTime;
 
     oscillator.type = "sine";
-    oscillator.frequency.setValueAtTime(880, now);
-    oscillator.frequency.setValueAtTime(1174.66, now + 0.10);
+    if (urgent) {
+      oscillator.frequency.setValueAtTime(1046.5, now);
+      oscillator.frequency.setValueAtTime(1318.5, now + 0.12);
+      oscillator.frequency.setValueAtTime(1568, now + 0.24);
+    } else {
+      oscillator.frequency.setValueAtTime(880, now);
+      oscillator.frequency.setValueAtTime(1174.66, now + 0.10);
+    }
 
+    const duration = urgent ? 0.46 : 0.32;
     gain.gain.setValueAtTime(0.0001, now);
-    gain.gain.exponentialRampToValueAtTime(0.16, now + 0.025);
-    gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.32);
+    gain.gain.exponentialRampToValueAtTime(urgent ? 0.2 : 0.16, now + 0.025);
+    gain.gain.exponentialRampToValueAtTime(0.0001, now + duration);
 
     oscillator.connect(gain);
     gain.connect(ctx.destination);
     oscillator.start(now);
-    oscillator.stop(now + 0.34);
+    oscillator.stop(now + duration + 0.02);
   } catch (error) {
     console.warn("消息提示音播放失败：", error);
   }
@@ -100,6 +179,8 @@ async function playNotificationSound() {
 document.addEventListener("pointerdown", () => {
   if (!me) return;
   unlockNotificationAudio();
+
+  if (notificationSettings.dnd || !notificationSettings.desktop) return;
 
   if (
     !notificationPermissionRequested &&
@@ -122,6 +203,7 @@ let notificationDeniedHintShown = false;
 function checkNotificationPermissionHint() {
   if (notificationDeniedHintShown) return;
   if (!me || !("Notification" in window)) return;
+  if (notificationSettings.dnd || !notificationSettings.desktop) return;
 
   const permission = Notification.permission;
   if (permission === "granted") return;
@@ -167,15 +249,16 @@ document.addEventListener("visibilitychange", () => {
   if (!document.hidden) checkNotificationPermissionHint();
 }, { passive: true });
 
-function showConversationNotification(conv) {
+function showConversationNotification(conv, options = {}) {
   if (!me || !("Notification" in window)) return;
+  if (notificationSettings.dnd || !notificationSettings.desktop) return;
   if (Notification.permission !== "granted") return;
   if (!conv.last_sender_id || conv.last_sender_id === me.id) return;
   // NOTIF-20261123: 旧逻辑在"正在查看该会话"时一律跳过桌面通知。
   // 但页面在后台标签页（document.hidden）时，用户其实不在看，
   // 此时即使是当前会话也应该弹通知。只有页面可见且确实在看才跳过。
   const viewingThisConversation = !document.hidden && conv.id === activeConversation;
-  if (viewingThisConversation) return;
+  if (viewingThisConversation && !options.force) return;
 
   const senderName =
     conv.last_sender_display_name ||
@@ -183,13 +266,14 @@ function showConversationNotification(conv) {
     conv.other_username ||
     "新消息";
 
-  const title = conv.type === "group"
+  const title = (options.mentioned ? "有人@你 · " : "") + (conv.type === "group"
     ? senderName + "（" + (conv.group_name || "群聊") + "）"
-    : senderName;
+    : senderName);
 
   try {
     const notification = new Notification(title, {
-      body: String(conv.last_message || "发送了一条新消息").slice(0, 180),
+      body: (options.mentioned ? "@你：" : "") +
+        String(conv.last_message || "发送了一条新消息").slice(0, 180),
       requireInteraction: false
     });
 
@@ -246,8 +330,9 @@ function checkNewMessageNotifications(conversations) {
         conv.last_sender_id &&
         conv.last_sender_id !== me?.id
       ) {
-        playNotificationSound();
-        showConversationNotification(conv);
+        const mentioned = conv.type === "group" && textMentionsMe(conv.last_message);
+        playNotificationSound(mentioned);
+        showConversationNotification(conv, { mentioned });
       }
       return;
     }
@@ -258,12 +343,151 @@ function checkNewMessageNotifications(conversations) {
       conv.last_sender_id &&
       conv.last_sender_id !== me?.id
     ) {
-      playNotificationSound();
-      showConversationNotification(conv);
+      const mentioned = conv.type === "group" && textMentionsMe(conv.last_message);
+      playNotificationSound(mentioned);
+      showConversationNotification(conv, { mentioned });
     }
 
     knownLastMessageIds.set(conv.id, currentId);
   });
+}
+
+
+let mentionToastTimer = null;
+function showMentionToast(message) {
+  if (notificationSettings.dnd) return;
+  let toast = $("#mentionToast");
+  if (!toast) {
+    toast = document.createElement("div");
+    toast.id = "mentionToast";
+    toast.className = "mention-toast";
+    toast.addEventListener("click", () => { toast.hidden = true; });
+    document.body.appendChild(toast);
+  }
+  const name = message.senderDisplayName || message.sender_display_name || "群成员";
+  const body = String(message.body || "").slice(0, 80);
+  toast.textContent = name + " 在群里 @ 了你：" + body;
+  toast.hidden = false;
+  if (mentionToastTimer) clearTimeout(mentionToastTimer);
+  mentionToastTimer = setTimeout(() => { toast.hidden = true; }, 6000);
+}
+
+function notificationPermissionText() {
+  if (!("Notification" in window)) return "当前浏览器不支持桌面通知";
+  if (Notification.permission === "granted") return "浏览器已允许桌面通知";
+  if (Notification.permission === "denied") return "浏览器已禁用桌面通知，请在站点设置中允许";
+  return "开启后会请求浏览器通知权限";
+}
+
+function ensureNotificationSettingsUi() {
+  if ($("#notificationSettingsBtn")) return;
+  const header = document.querySelector("header.top");
+  if (!header) return;
+
+  const button = document.createElement("button");
+  button.id = "notificationSettingsBtn";
+  button.type = "button";
+  button.className = "notification-settings-button";
+  button.title = "通知设置";
+  button.setAttribute("aria-label", "通知设置");
+  button.textContent = "🔔";
+  button.hidden = true;
+  header.insertBefore(button, $("#userbar"));
+
+  const modal = document.createElement("div");
+  modal.id = "notificationSettingsModal";
+  modal.className = "notification-settings-modal";
+  modal.hidden = true;
+
+  const dialog = document.createElement("div");
+  dialog.className = "notification-settings-dialog";
+
+  const title = document.createElement("h3");
+  title.textContent = "通知设置";
+
+  const makeToggle = (id, text, hint) => {
+    const label = document.createElement("label");
+    label.className = "notification-toggle";
+    const input = document.createElement("input");
+    input.type = "checkbox";
+    input.id = id;
+    const span = document.createElement("span");
+    span.textContent = text;
+    const small = document.createElement("small");
+    small.textContent = hint;
+    label.append(input, span, small);
+    return label;
+  };
+
+  const desktop = makeToggle("notifDesktop", "桌面通知", "页面在后台时弹窗提醒新消息");
+  const sound = makeToggle("notifSound", "消息提示音", "收到新消息时播放提示音");
+  const dnd = makeToggle("notifDnd", "免打扰", "关闭所有桌面通知和提示音");
+
+  const permission = document.createElement("p");
+  permission.id = "notifPermissionState";
+  permission.className = "notification-permission-state";
+
+  const close = document.createElement("button");
+  close.type = "button";
+  close.id = "notifSettingsClose";
+  close.className = "primary";
+  close.textContent = "关闭";
+
+  dialog.append(title, desktop, sound, dnd, permission, close);
+  modal.appendChild(dialog);
+  document.body.appendChild(modal);
+
+  const sync = () => {
+    $("#notifDesktop").checked = notificationSettings.desktop;
+    $("#notifSound").checked = notificationSettings.sound;
+    $("#notifDnd").checked = notificationSettings.dnd;
+    $("#notifPermissionState").textContent = notificationPermissionText();
+  };
+
+  button.addEventListener("click", async () => {
+    sync();
+    modal.hidden = false;
+    if (
+      notificationSettings.desktop &&
+      !notificationSettings.dnd &&
+      "Notification" in window &&
+      Notification.permission === "default"
+    ) {
+      try { await Notification.requestPermission(); } catch {}
+      sync();
+    }
+  });
+
+  close.addEventListener("click", () => { modal.hidden = true; });
+  modal.addEventListener("click", event => {
+    if (event.target === modal) modal.hidden = true;
+  });
+
+  $("#notifDesktop").addEventListener("change", async event => {
+    notificationSettings.desktop = event.target.checked;
+    if (
+      notificationSettings.desktop &&
+      "Notification" in window &&
+      Notification.permission === "default"
+    ) {
+      try { await Notification.requestPermission(); } catch {}
+    }
+    saveNotificationSettings();
+    sync();
+  });
+
+  $("#notifSound").addEventListener("change", event => {
+    notificationSettings.sound = event.target.checked;
+    saveNotificationSettings();
+  });
+
+  $("#notifDnd").addEventListener("change", event => {
+    notificationSettings.dnd = event.target.checked;
+    saveNotificationSettings();
+    sync();
+  });
+
+  sync();
 }
 
 async function boot() {
@@ -284,6 +508,9 @@ async function boot() {
     $("#chat").hidden = false;
     $("#adminPanel").hidden = true;
     $("#userbar").textContent = `${me.displayName}\uFF08${me.role === "admin" ? "\u8D85\u7EA7\u7BA1\u7406\u5458" : "\u666E\u901A\u7528\u6237"}\uFF09`;
+    ensureNotificationSettingsUi();
+    const notificationButton = $("#notificationSettingsBtn");
+    if (notificationButton) notificationButton.hidden = false;
     $("#adminBtn").hidden = me.role !== "admin";
 await loadContacts();
 
@@ -317,7 +544,8 @@ function formatConversationPreview(conv) {
 
   const sender = conv.last_sender_display_name || "\u7528\u6237";
   const body = String(conv.last_message || "");
-  return sender + "\uff1a" + body;
+  const mentioned = conv.type === "group" && textMentionsMe(body);
+  return (mentioned ? "\u6709\u4eba@\u6211 \u00b7 " : "") + sender + "\uff1a" + body;
 }
 // PERF-20261123: 收到 WebSocket 消息后的侧栏刷新调度（节流 3 秒）。
 // 原先每条消息都直接 loadContacts()（一次 3 个 HTTP 请求），
@@ -807,6 +1035,12 @@ async function openDirect(contact) {
     activeConversation = conversationId;
     activeConversationType = "direct";
   clearReplyTarget();
+  resetMessageHistory();
+  ensureHistoryControls();
+  ensureChatSearchUi();
+  renderChatTools();
+  renderGroupMeta(null);
+  closeGroupFilesModal();
   connectSocket();
   $("#messageInput").value = conversationDrafts.get(String(activeConversation)) || "";
 
@@ -882,6 +1116,14 @@ async function openGroup(conv) {
   activeConversation = conversationId;
   activeConversationType = "group";
   clearReplyTarget();
+  resetMessageHistory();
+  ensureHistoryControls();
+  ensureChatSearchUi();
+  renderChatTools();
+  ensureGroupMetaUi();
+  renderGroupMeta(groupMetaCache.get(conversationId) || null);
+  loadGroupMeta(conversationId);
+  closeGroupFilesModal();
   connectSocket();
   $("#messageInput").value = conversationDrafts.get(String(activeConversation)) || "";
   $("#messages").innerHTML = "";
@@ -944,7 +1186,7 @@ async function openGroup(conv) {
 }
 
 async function loadMessages() {
-  if (!activeConversation) return;
+  if (!activeConversation || messageContextMode) return;
 
   const conversationId = activeConversation;
   if (messageCacheConversation !== conversationId) {
@@ -962,6 +1204,7 @@ async function loadMessages() {
     if (activeConversation !== conversationId || loadToken !== messageLoadSequence) return;
 
     const container = $("#messages");
+    const firstLoad = !container.querySelector("[data-message-id]");
     const existingIds = new Set(
       Array.from(
         container.querySelectorAll("[data-message-id]"),
@@ -980,46 +1223,626 @@ async function loadMessages() {
 
       if (id) existingIds.add(id);
     }
+
+    if (firstLoad) {
+      oldestLoadedAt = d.messages[0]?.created_at || null;
+      hasOlderMessages = d.messages.length >= 100;
+      renderLoadOlderBar();
+    }
   } finally {
     if (loadToken === messageLoadSequence) messagesLoading = false;
   }
 }
 
-function showImagePreview(src) {
-  let overlay = document.querySelector("#imagePreviewOverlay");
 
-  if (!overlay) {
-    overlay = document.createElement("div");
-    overlay.id = "imagePreviewOverlay";
-    overlay.className = "image-preview-overlay";
+function resetMessageHistory() {
+  messageContextMode = false;
+  oldestLoadedAt = null;
+  hasOlderMessages = true;
+  loadingOlderMessages = false;
+  const back = $("#backToLatestBtn");
+  if (back) back.hidden = true;
+  renderLoadOlderBar();
+}
 
-    const close = document.createElement("button");
-    close.type = "button";
-    close.className = "image-preview-close";
-    close.textContent = "关闭";
+function renderChatTools() {
+  const button = $("#chatSearchBtn");
+  if (button) button.disabled = !activeConversation;
+}
 
-    const image = document.createElement("img");
-    image.alt = "图片预览";
+function ensureHistoryControls() {
+  if ($("#loadOlderBar")) return;
+  const messages = $("#messages");
+  if (!messages || !messages.parentNode) return;
 
-    overlay.append(close, image);
-    document.body.appendChild(overlay);
+  const bar = document.createElement("button");
+  bar.id = "loadOlderBar";
+  bar.type = "button";
+  bar.className = "load-older-bar";
+  bar.textContent = "加载更早消息";
+  bar.hidden = true;
+  bar.addEventListener("click", () => loadOlderMessages());
+  messages.parentNode.insertBefore(bar, messages);
 
-    close.addEventListener("click", () => {
-      overlay.hidden = true;
-      image.removeAttribute("src");
-    });
+  const back = document.createElement("button");
+  back.id = "backToLatestBtn";
+  back.type = "button";
+  back.className = "back-to-latest";
+  back.textContent = "回到最新";
+  back.hidden = true;
+  back.addEventListener("click", () => backToLatest());
+  const conversation = document.querySelector(".conversation");
+  if (conversation) conversation.appendChild(back);
 
-    overlay.addEventListener("click", event => {
-      if (event.target === overlay) {
-        overlay.hidden = true;
-        image.removeAttribute("src");
-      }
-    });
+  messages.addEventListener("scroll", () => {
+    if (!activeConversation) return;
+    if (messages.scrollTop < 80) loadOlderMessages();
+  }, { passive: true });
+}
+
+function renderLoadOlderBar() {
+  const bar = $("#loadOlderBar");
+  if (!bar) return;
+  bar.hidden = !activeConversation || !hasOlderMessages;
+  bar.disabled = loadingOlderMessages;
+  bar.textContent = loadingOlderMessages ? "正在加载…" : "加载更早消息";
+}
+
+async function loadOlderMessages() {
+  if (!activeConversation || !oldestLoadedAt || loadingOlderMessages || !hasOlderMessages) return;
+
+  const conversationId = activeConversation;
+  const container = $("#messages");
+  const previousHeight = container.scrollHeight;
+  const previousTop = container.scrollTop;
+
+  loadingOlderMessages = true;
+  renderLoadOlderBar();
+
+  try {
+    const data = await api(
+      `/api/conversations/${encodeURIComponent(conversationId)}/messages/older?before=${encodeURIComponent(oldestLoadedAt)}`
+    );
+    if (activeConversation !== conversationId) return;
+
+    const existingIds = new Set(
+      Array.from(container.querySelectorAll("[data-message-id]"), el => el.dataset.messageId)
+    );
+    const messages = Array.isArray(data.messages) ? data.messages : [];
+
+    for (let index = messages.length - 1; index >= 0; index--) {
+      const message = messages[index];
+      const id = message.id ? String(message.id) : "";
+      if (id && existingIds.has(id)) continue;
+      renderMessage(message, undefined, true);
+      if (id) existingIds.add(id);
+    }
+
+    if (messages.length) {
+      oldestLoadedAt = messages[0].created_at || oldestLoadedAt;
+    }
+    hasOlderMessages = Boolean(data.hasMore);
+    container.scrollTop = previousTop + (container.scrollHeight - previousHeight);
+  } catch (error) {
+    console.error("加载更早消息失败：", error);
+  } finally {
+    loadingOlderMessages = false;
+    renderLoadOlderBar();
+  }
+}
+
+function flashMessageElement(element) {
+  if (!element) return;
+  element.classList.add("search-target");
+  setTimeout(() => element.classList.remove("search-target"), 2200);
+}
+
+async function loadMessageContext(messageId) {
+  if (!activeConversation) return;
+  const conversationId = activeConversation;
+  const container = $("#messages");
+
+  try {
+    const data = await api(
+      `/api/conversations/${encodeURIComponent(conversationId)}/messages/context?messageId=${encodeURIComponent(messageId)}`
+    );
+    if (activeConversation !== conversationId) return;
+
+    messageContextMode = true;
+    container.innerHTML = "";
+    messageCache.clear();
+    messageCacheConversation = conversationId;
+
+    const messages = Array.isArray(data.messages) ? data.messages : [];
+    for (const message of messages) renderMessage(message);
+
+    oldestLoadedAt = messages[0]?.created_at || null;
+    hasOlderMessages = Boolean(data.hasMore);
+    renderLoadOlderBar();
+
+    const target = container.querySelector(
+      '[data-message-id="' + String(messageId).replace(/"/g, '\\"') + '"]'
+    );
+    if (target) {
+      target.scrollIntoView({ block: "center" });
+      flashMessageElement(target);
+    }
+    const back = $("#backToLatestBtn");
+    if (back) back.hidden = false;
+  } catch (error) {
+    alert(error.message || "加载消息上下文失败");
+  }
+}
+
+async function backToLatest() {
+  if (!activeConversation) return;
+  messageContextMode = false;
+  oldestLoadedAt = null;
+  hasOlderMessages = true;
+  $("#messages").innerHTML = "";
+  messageCache.clear();
+  messageCacheConversation = activeConversation;
+  const back = $("#backToLatestBtn");
+  if (back) back.hidden = true;
+  await loadMessages();
+  const container = $("#messages");
+  container.scrollTop = container.scrollHeight;
+  renderLoadOlderBar();
+}
+
+function revealMessage(messageId) {
+  if (!messageId) return;
+  const target = document.querySelector(
+    '[data-message-id="' + String(messageId).replace(/"/g, '\\"') + '"]'
+  );
+  if (target) {
+    target.scrollIntoView({ behavior: "smooth", block: "center" });
+    flashMessageElement(target);
+    return;
+  }
+  loadMessageContext(messageId);
+}
+
+let chatSearchTimer = null;
+let chatSearchRequest = 0;
+
+function ensureChatSearchUi() {
+  if ($("#chatSearchModal")) return;
+  const head = document.querySelector(".conv-head");
+  const clearButton = $("#clearChatBtn");
+  if (!head || !clearButton) return;
+
+  const button = document.createElement("button");
+  button.id = "chatSearchBtn";
+  button.type = "button";
+  button.className = "conv-head-action";
+  button.textContent = "搜索";
+  button.title = "搜索聊天记录";
+  button.disabled = true;
+  button.addEventListener("click", () => openChatSearch());
+  head.insertBefore(button, clearButton);
+
+  const modal = document.createElement("div");
+  modal.id = "chatSearchModal";
+  modal.className = "chat-search-modal";
+  modal.hidden = true;
+
+  const dialog = document.createElement("div");
+  dialog.className = "chat-search-dialog";
+
+  const header = document.createElement("div");
+  header.className = "chat-search-head";
+
+  const title = document.createElement("h3");
+  title.textContent = "搜索聊天记录";
+
+  const close = document.createElement("button");
+  close.type = "button";
+  close.id = "chatSearchClose";
+  close.textContent = "×";
+  close.setAttribute("aria-label", "关闭");
+
+  header.append(title, close);
+
+  const input = document.createElement("input");
+  input.id = "chatSearchInput";
+  input.type = "search";
+  input.placeholder = "输入关键词，回车搜索";
+  input.autocomplete = "off";
+
+  const results = document.createElement("div");
+  results.id = "chatSearchResults";
+  results.className = "chat-search-results";
+
+  dialog.append(header, input, results);
+  modal.appendChild(dialog);
+  document.getElementById("chat").appendChild(modal);
+
+  close.addEventListener("click", () => { modal.hidden = true; });
+  modal.addEventListener("click", event => {
+    if (event.target === modal) modal.hidden = true;
+  });
+  input.addEventListener("input", () => {
+    if (chatSearchTimer) clearTimeout(chatSearchTimer);
+    const keyword = input.value.trim();
+    if (!keyword) {
+      results.replaceChildren();
+      return;
+    }
+    chatSearchTimer = setTimeout(() => runChatSearch(keyword), 300);
+  });
+  input.addEventListener("keydown", event => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      if (chatSearchTimer) clearTimeout(chatSearchTimer);
+      runChatSearch(input.value.trim());
+    } else if (event.key === "Escape") {
+      modal.hidden = true;
+    }
+  });
+}
+
+function openChatSearch() {
+  if (!activeConversation) return;
+  ensureChatSearchUi();
+  const modal = $("#chatSearchModal");
+  modal.hidden = false;
+  const input = $("#chatSearchInput");
+  input.focus();
+  input.select();
+}
+
+function appendSearchHighlight(container, text, keyword) {
+  const value = String(text || "");
+  const lower = value.toLowerCase();
+  const needle = String(keyword || "").toLowerCase();
+  if (!needle) {
+    container.textContent = value;
+    return;
+  }
+  let index = 0;
+  while (index < value.length) {
+    const found = lower.indexOf(needle, index);
+    if (found < 0) {
+      container.appendChild(document.createTextNode(value.slice(index)));
+      break;
+    }
+    if (found > index) {
+      container.appendChild(document.createTextNode(value.slice(index, found)));
+    }
+    const mark = document.createElement("mark");
+    mark.textContent = value.slice(found, found + needle.length);
+    container.appendChild(mark);
+    index = found + needle.length;
+  }
+}
+
+function renderChatSearchResults(messages, keyword) {
+  const list = $("#chatSearchResults");
+  if (!list) return;
+  list.replaceChildren();
+
+  if (!messages.length) {
+    const empty = document.createElement("p");
+    empty.className = "chat-search-empty";
+    empty.textContent = "没有找到匹配的消息";
+    list.appendChild(empty);
+    return;
   }
 
-  const previewImage = overlay.querySelector("img");
-  previewImage.src = src;
+  const count = document.createElement("div");
+  count.className = "chat-search-count";
+  count.textContent = "找到 " + messages.length + " 条消息";
+  list.appendChild(count);
+
+  const typeNames = { image: "[图片]", file: "[文件]", voice: "[语音]" };
+
+  messages.forEach(message => {
+    const row = document.createElement("button");
+    row.type = "button";
+    row.className = "chat-search-result";
+
+    const meta = document.createElement("div");
+    meta.className = "chat-search-result-meta";
+
+    const sender = document.createElement("b");
+    sender.textContent = message.sender_display_name || "用户";
+
+    const time = document.createElement("small");
+    const when = new Date(message.created_at || "");
+    time.textContent = Number.isFinite(when.getTime())
+      ? when.toLocaleString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" })
+      : "";
+
+    meta.append(sender, time);
+
+    const body = document.createElement("div");
+    body.className = "chat-search-result-body";
+    const prefix = typeNames[message.message_type] || "";
+    if (prefix) {
+      const badge = document.createElement("span");
+      badge.className = "chat-search-type";
+      badge.textContent = prefix;
+      body.appendChild(badge);
+    }
+    appendSearchHighlight(body, message.file_name || message.body || "", keyword);
+
+    row.append(meta, body);
+    row.addEventListener("click", () => {
+      $("#chatSearchModal").hidden = true;
+      revealMessage(message.id);
+    });
+    list.appendChild(row);
+  });
+}
+
+async function runChatSearch(keyword) {
+  const query = String(keyword || "").trim();
+  if (!query || !activeConversation) return;
+  const conversationId = activeConversation;
+  const requestId = ++chatSearchRequest;
+  const list = $("#chatSearchResults");
+  if (list) {
+    list.replaceChildren();
+    const loading = document.createElement("p");
+    loading.className = "chat-search-empty";
+    loading.textContent = "正在搜索…";
+    list.appendChild(loading);
+  }
+
+  try {
+    const data = await api(
+      `/api/conversations/${encodeURIComponent(conversationId)}/messages/search?q=${encodeURIComponent(query)}`
+    );
+    if (requestId !== chatSearchRequest || activeConversation !== conversationId) return;
+    renderChatSearchResults(Array.isArray(data.messages) ? data.messages : [], query);
+  } catch (error) {
+    if (requestId !== chatSearchRequest) return;
+    if (list) {
+      list.replaceChildren();
+      const failed = document.createElement("p");
+      failed.className = "chat-search-empty";
+      failed.textContent = error.message || "搜索失败";
+      list.appendChild(failed);
+    }
+  }
+}
+
+let imagePreviewList = [];
+let imagePreviewIndex = 0;
+let imagePreviewScale = 1;
+let imagePreviewX = 0;
+let imagePreviewY = 0;
+let imagePreviewPointer = null;
+let imagePreviewSwipe = null;
+
+function currentConversationImages() {
+  return [...messageCache.values()]
+    .filter(m => m && m.message_type === "image" && !m.recalled_at && m.id)
+    .sort((a, b) => new Date(a.created_at || 0) - new Date(b.created_at || 0));
+}
+
+function ensureImagePreview() {
+  if ($("#imagePreviewOverlay")) return;
+
+  const overlay = document.createElement("div");
+  overlay.id = "imagePreviewOverlay";
+  overlay.className = "image-preview-overlay";
+  overlay.hidden = true;
+
+  const stage = document.createElement("div");
+  stage.className = "image-preview-stage";
+
+  const image = document.createElement("img");
+  image.id = "imagePreviewImage";
+  image.alt = "图片预览";
+  image.draggable = false;
+  stage.appendChild(image);
+
+  const counter = document.createElement("div");
+  counter.id = "imagePreviewCounter";
+  counter.className = "image-preview-counter";
+
+  const close = document.createElement("button");
+  close.type = "button";
+  close.id = "imagePreviewClose";
+  close.className = "image-preview-close";
+  close.textContent = "×";
+  close.setAttribute("aria-label", "关闭");
+
+  const prev = document.createElement("button");
+  prev.type = "button";
+  prev.id = "imagePreviewPrev";
+  prev.className = "image-preview-nav";
+  prev.textContent = "‹";
+  prev.setAttribute("aria-label", "上一张");
+
+  const next = document.createElement("button");
+  next.type = "button";
+  next.id = "imagePreviewNext";
+  next.className = "image-preview-nav";
+  next.textContent = "›";
+  next.setAttribute("aria-label", "下一张");
+
+  const toolbar = document.createElement("div");
+  toolbar.className = "image-preview-toolbar";
+  [["−", "缩小", "out"], ["1:1", "原始大小", "reset"], ["+", "放大", "in"]].forEach(([label, title, action]) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.textContent = label;
+    button.title = title;
+    button.dataset.zoom = action;
+    toolbar.appendChild(button);
+  });
+
+  overlay.append(stage, counter, close, prev, next, toolbar);
+  document.body.appendChild(overlay);
+
+  const apply = () => {
+    image.style.transform = `translate(${imagePreviewX}px, ${imagePreviewY}px) scale(${imagePreviewScale})`;
+    image.classList.toggle("zoomed", imagePreviewScale > 1.01);
+  };
+
+  const reset = () => {
+    imagePreviewScale = 1;
+    imagePreviewX = 0;
+    imagePreviewY = 0;
+    apply();
+  };
+
+  const zoomBy = delta => {
+    imagePreviewScale = Math.min(5, Math.max(1, imagePreviewScale + delta));
+    if (imagePreviewScale <= 1.01) {
+      imagePreviewX = 0;
+      imagePreviewY = 0;
+    }
+    apply();
+  };
+
+  const navigate = step => {
+    if (imagePreviewList.length < 2) return;
+    imagePreviewIndex = (imagePreviewIndex + step + imagePreviewList.length) % imagePreviewList.length;
+    renderImagePreview();
+  };
+
+  const closePreview = () => {
+    overlay.hidden = true;
+    image.removeAttribute("src");
+    document.body.classList.remove("preview-open");
+    reset();
+  };
+
+  close.addEventListener("click", closePreview);
+  prev.addEventListener("click", () => navigate(-1));
+  next.addEventListener("click", () => navigate(1));
+
+  toolbar.addEventListener("click", event => {
+    const button = event.target.closest("button[data-zoom]");
+    if (!button) return;
+    if (button.dataset.zoom === "in") zoomBy(0.5);
+    else if (button.dataset.zoom === "out") zoomBy(-0.5);
+    else reset();
+  });
+
+  stage.addEventListener("wheel", event => {
+    if (overlay.hidden) return;
+    event.preventDefault();
+    zoomBy(event.deltaY < 0 ? 0.25 : -0.25);
+  }, { passive: false });
+
+  image.addEventListener("dblclick", event => {
+    event.preventDefault();
+    if (imagePreviewScale > 1.01) {
+      reset();
+    } else {
+      imagePreviewScale = 2.5;
+      apply();
+    }
+  });
+
+  stage.addEventListener("pointerdown", event => {
+    if (overlay.hidden) return;
+    imagePreviewPointer = {
+      id: event.pointerId,
+      x: event.clientX,
+      y: event.clientY,
+      startX: imagePreviewX,
+      startY: imagePreviewY
+    };
+    imagePreviewSwipe = { x: event.clientX, y: event.clientY };
+    if (imagePreviewScale > 1.01) {
+      try { stage.setPointerCapture(event.pointerId); } catch {}
+      image.classList.add("dragging");
+    }
+  });
+
+  stage.addEventListener("pointermove", event => {
+    if (!imagePreviewPointer || event.pointerId !== imagePreviewPointer.id) return;
+    if (imagePreviewScale > 1.01) {
+      imagePreviewX = imagePreviewPointer.startX + (event.clientX - imagePreviewPointer.x);
+      imagePreviewY = imagePreviewPointer.startY + (event.clientY - imagePreviewPointer.y);
+      apply();
+    }
+  });
+
+  const endPointer = event => {
+    if (!imagePreviewPointer || event.pointerId !== imagePreviewPointer.id) return;
+    const dx = imagePreviewSwipe ? event.clientX - imagePreviewSwipe.x : 0;
+    const dy = imagePreviewSwipe ? event.clientY - imagePreviewSwipe.y : 0;
+    image.classList.remove("dragging");
+    if (imagePreviewScale <= 1.01 && Math.abs(dx) > 50 && Math.abs(dx) > Math.abs(dy)) {
+      navigate(dx < 0 ? 1 : -1);
+    }
+    imagePreviewPointer = null;
+    imagePreviewSwipe = null;
+  };
+
+  stage.addEventListener("pointerup", endPointer);
+  stage.addEventListener("pointercancel", endPointer);
+
+  overlay.addEventListener("click", event => {
+    if (event.target === overlay || event.target === stage) closePreview();
+  });
+
+  document.addEventListener("keydown", event => {
+    if (overlay.hidden) return;
+    if (event.key === "Escape") closePreview();
+    else if (event.key === "ArrowLeft") navigate(-1);
+    else if (event.key === "ArrowRight") navigate(1);
+    else if (event.key === "+" || event.key === "=") zoomBy(0.5);
+    else if (event.key === "-") zoomBy(-0.5);
+    else if (event.key === "0") reset();
+  });
+
+  window.cloudChatResetImagePreview = reset;
+}
+
+function renderImagePreview() {
+  const overlay = $("#imagePreviewOverlay");
+  if (!overlay || overlay.hidden) return;
+  const item = imagePreviewList[imagePreviewIndex];
+  if (!item) return;
+  const image = $("#imagePreviewImage");
+  image.src = item.url;
+  image.alt = item.alt || "图片预览";
+  $("#imagePreviewCounter").textContent =
+    (imagePreviewIndex + 1) + " / " + imagePreviewList.length;
+  $("#imagePreviewPrev").hidden = imagePreviewList.length < 2;
+  $("#imagePreviewNext").hidden = imagePreviewList.length < 2;
+  if (window.cloudChatResetImagePreview) window.cloudChatResetImagePreview();
+}
+
+function showImagePreview(target) {
+  ensureImagePreview();
+  const overlay = $("#imagePreviewOverlay");
+  const images = currentConversationImages().map(m => ({
+    id: String(m.id),
+    url: `/api/conversations/${encodeURIComponent(activeConversation)}/images/${encodeURIComponent(m.id)}`,
+    alt: m.image_file_name || m.file_name || "聊天图片"
+  }));
+
+  let index = -1;
+  if (typeof target === "string") {
+    index = images.findIndex(item => item.url === target || item.id === target);
+  }
+  if (index < 0 && target) {
+    index = images.findIndex(item => item.id === String(target));
+  }
+
+  if (!images.length) {
+    images.push({
+      id: "",
+      url: typeof target === "string" ? target : "",
+      alt: "图片预览"
+    });
+    index = 0;
+  }
+
+  imagePreviewList = images;
+  imagePreviewIndex = Math.max(0, index);
   overlay.hidden = false;
+  document.body.classList.add("preview-open");
+  renderImagePreview();
 }
 async function forwardTextMessage(message) {
   const sourceMessageId = String(message.id || "");
@@ -2103,7 +2926,256 @@ function clearReplyTarget() {
   if (text) text.textContent = "";
 }
 
-function renderMessage(m, pendingBody) {
+
+function ensureGroupMetaUi() {
+  if ($("#groupFilesBtn")) return;
+  const head = document.querySelector(".conv-head");
+  const clearButton = $("#clearChatBtn");
+  if (!head || !clearButton) return;
+
+  const filesButton = document.createElement("button");
+  filesButton.id = "groupFilesBtn";
+  filesButton.type = "button";
+  filesButton.className = "conv-head-action";
+  filesButton.textContent = "群文件";
+  filesButton.title = "查看群文件";
+  filesButton.hidden = true;
+  filesButton.addEventListener("click", () => openGroupFiles());
+
+  const announcementButton = document.createElement("button");
+  announcementButton.id = "groupAnnouncementBtn";
+  announcementButton.type = "button";
+  announcementButton.className = "conv-head-action";
+  announcementButton.textContent = "群公告";
+  announcementButton.title = "查看群公告";
+  announcementButton.hidden = true;
+  announcementButton.addEventListener("click", () => $("#convTitle").click());
+
+  head.insertBefore(filesButton, clearButton);
+  head.insertBefore(announcementButton, filesButton);
+
+  const banner = document.createElement("div");
+  banner.id = "groupAnnouncementBanner";
+  banner.className = "group-announcement-banner";
+  banner.hidden = true;
+
+  const label = document.createElement("span");
+  label.className = "group-announcement-label";
+  label.textContent = "群公告";
+
+  const text = document.createElement("span");
+  text.id = "groupAnnouncementText";
+  text.className = "group-announcement-text";
+
+  banner.append(label, text);
+  banner.addEventListener("click", () => $("#convTitle").click());
+  $("#messages").parentNode.insertBefore(banner, $("#messages"));
+}
+
+function renderGroupMeta(meta) {
+  ensureGroupMetaUi();
+  const isGroup = activeConversationType === "group" && !!activeConversation;
+  const filesButton = $("#groupFilesBtn");
+  const announcementButton = $("#groupAnnouncementBtn");
+  const banner = $("#groupAnnouncementBanner");
+  const announcement = meta && meta.announcement ? String(meta.announcement) : "";
+
+  if (filesButton) filesButton.hidden = !isGroup;
+  if (announcementButton) announcementButton.hidden = !isGroup || !announcement;
+  if (!banner) return;
+
+  if (!isGroup || !announcement) {
+    banner.hidden = true;
+    return;
+  }
+
+  $("#groupAnnouncementText").textContent = announcement;
+  banner.hidden = false;
+}
+
+async function loadGroupMeta(conversationId) {
+  try {
+    const data = await api(
+      `/api/conversations/${encodeURIComponent(conversationId)}/group-info`
+    );
+    if (activeConversation !== conversationId || activeConversationType !== "group") return;
+    groupMetaCache.set(conversationId, data);
+    renderGroupMeta(data);
+  } catch {}
+}
+
+let groupFilesCache = [];
+let groupFilesFilter = "all";
+
+function ensureGroupFilesModal() {
+  if ($("#groupFilesModal")) return;
+
+  const modal = document.createElement("div");
+  modal.id = "groupFilesModal";
+  modal.className = "group-files-modal";
+  modal.hidden = true;
+
+  const dialog = document.createElement("div");
+  dialog.className = "group-files-dialog";
+
+  const head = document.createElement("div");
+  head.className = "group-files-head";
+
+  const title = document.createElement("h3");
+  title.textContent = "群文件";
+
+  const close = document.createElement("button");
+  close.type = "button";
+  close.id = "groupFilesClose";
+  close.textContent = "×";
+  close.setAttribute("aria-label", "关闭");
+
+  head.append(title, close);
+
+  const tabs = document.createElement("div");
+  tabs.className = "group-files-tabs";
+  [["all", "全部"], ["image", "图片"], ["file", "文件"], ["voice", "语音"]].forEach(([value, label], index) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.dataset.filter = value;
+    button.textContent = label;
+    if (index === 0) button.classList.add("active");
+    tabs.appendChild(button);
+  });
+
+  const list = document.createElement("div");
+  list.id = "groupFilesList";
+  list.className = "group-files-list";
+
+  dialog.append(head, tabs, list);
+  modal.appendChild(dialog);
+  document.getElementById("chat").appendChild(modal);
+
+  close.addEventListener("click", () => { modal.hidden = true; });
+  modal.addEventListener("click", event => {
+    if (event.target === modal) modal.hidden = true;
+  });
+  tabs.addEventListener("click", event => {
+    const button = event.target.closest("button[data-filter]");
+    if (!button) return;
+    groupFilesFilter = button.dataset.filter;
+    tabs.querySelectorAll("button").forEach(item => {
+      item.classList.toggle("active", item === button);
+    });
+    renderGroupFiles();
+  });
+}
+
+function closeGroupFilesModal() {
+  const modal = $("#groupFilesModal");
+  if (modal) modal.hidden = true;
+}
+
+function formatAttachmentSize(bytes) {
+  const size = Number(bytes || 0);
+  if (!size) return "";
+  if (size >= 1024 * 1024) return (size / 1024 / 1024).toFixed(2) + " MB";
+  return (size / 1024).toFixed(1) + " KB";
+}
+
+function renderGroupFiles() {
+  const list = $("#groupFilesList");
+  if (!list) return;
+
+  const items = groupFilesCache.filter(item =>
+    groupFilesFilter === "all" || item.message_type === groupFilesFilter
+  );
+
+  list.replaceChildren();
+
+  if (!items.length) {
+    const empty = document.createElement("p");
+    empty.className = "group-files-empty";
+    empty.textContent = "暂无文件";
+    list.appendChild(empty);
+    return;
+  }
+
+  items.forEach(item => {
+    const row = document.createElement("div");
+    row.className = "group-file-row";
+
+    const icon = document.createElement("span");
+    icon.className = "group-file-icon";
+    icon.textContent = item.message_type === "image" ? "🖼️"
+      : item.message_type === "voice" ? "🎙️" : "📎";
+
+    const info = document.createElement("div");
+    info.className = "group-file-info";
+
+    const name = document.createElement("b");
+    name.textContent = item.file_name || item.body ||
+      (item.message_type === "image" ? "图片" : "文件");
+
+    const meta = document.createElement("small");
+    const when = item.created_at ? new Date(item.created_at) : null;
+    const dateText = when && Number.isFinite(when.getTime())
+      ? when.toLocaleString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" })
+      : "";
+    const sizeText = formatAttachmentSize(item.file_size);
+    meta.textContent = [
+      item.sender_display_name || "群成员",
+      dateText,
+      sizeText
+    ].filter(Boolean).join(" · ");
+
+    info.append(name, meta);
+
+    const action = document.createElement("a");
+    action.className = "group-file-action";
+    action.textContent = item.message_type === "image" ? "查看" : "下载";
+    const kind = item.message_type === "image" ? "images"
+      : item.message_type === "voice" ? "voices" : "files";
+    const url = `/api/conversations/${encodeURIComponent(activeConversation)}/${kind}/${encodeURIComponent(item.id)}`;
+    action.href = url;
+    action.target = "_blank";
+    action.rel = "noopener";
+
+    if (item.message_type === "image") {
+      action.addEventListener("click", event => {
+        event.preventDefault();
+        showImagePreview(url);
+      });
+    }
+
+    row.append(icon, info, action);
+    list.appendChild(row);
+  });
+}
+
+async function openGroupFiles() {
+  if (!activeConversation) return;
+  ensureGroupFilesModal();
+  const modal = $("#groupFilesModal");
+  modal.hidden = false;
+  const list = $("#groupFilesList");
+  list.replaceChildren();
+  const loading = document.createElement("p");
+  loading.className = "group-files-empty";
+  loading.textContent = "正在加载…";
+  list.appendChild(loading);
+
+  try {
+    const data = await api(
+      `/api/conversations/${encodeURIComponent(activeConversation)}/attachments`
+    );
+    groupFilesCache = Array.isArray(data.attachments) ? data.attachments : [];
+    renderGroupFiles();
+  } catch (error) {
+    list.replaceChildren();
+    const failed = document.createElement("p");
+    failed.className = "group-files-empty";
+    failed.textContent = error.message || "加载群文件失败";
+    list.appendChild(failed);
+  }
+}
+
+function renderMessage(m, pendingBody, prepend = false) {
   const el = document.createElement("div");
   const mine = m.sender_id === me.id;
   const recalled = Boolean(m.recalled_at);
@@ -2111,6 +3183,9 @@ function renderMessage(m, pendingBody) {
   if (m.id) messageCache.set(String(m.id), m);
 
   el.className = "bubble" + (mine ? " mine" : "") + (recalled ? " recalled" : "");
+  if (!mine && activeConversationType === "group" && textMentionsMe(m.body)) {
+    el.classList.add("mention-me");
+  }
   if (m.id) el.dataset.messageId = m.id;
   if (pendingBody) {
     el.classList.add("pending");
@@ -2230,8 +3305,9 @@ function renderMessage(m, pendingBody) {
       image.className = "chat-image";
       image.alt = m.image_file_name || m.file_name || "聊天图片";
       image.loading = "lazy";
+      image.decoding = "async";
       image.src = imageUrl;
-      image.addEventListener("click", () => showImagePreview(imageUrl));
+      image.addEventListener("click", () => showImagePreview(m.id));
       el.appendChild(image);
     } else if (m.message_type === "voice") {
       const voiceCard = document.createElement("div");
@@ -2302,7 +3378,8 @@ function renderMessage(m, pendingBody) {
       el.appendChild(fileCard);
     } else {
       const content = document.createElement("div");
-      content.textContent = m.body || "";
+      content.className = "chat-message-text";
+      renderMessageText(content, m.body || "");
       el.appendChild(content);
     }
 
@@ -2396,10 +3473,13 @@ function renderMessage(m, pendingBody) {
     messagesContainer.clientHeight -
     messagesContainer.scrollTop <= 80;
 
-  messagesContainer.append(el);
-
-  if (wasAtBottom) {
-    messagesContainer.scrollTop = messagesContainer.scrollHeight;
+  if (prepend) {
+    messagesContainer.insertBefore(el, messagesContainer.firstChild);
+  } else {
+    messagesContainer.append(el);
+    if (wasAtBottom) {
+      messagesContainer.scrollTop = messagesContainer.scrollHeight;
+    }
   }
 
   return el;
@@ -2658,6 +3738,24 @@ function connectSocket() {
       red_status: d.message.redEnvelope?.status || "open",
       red_sender_id: d.message.redEnvelope?.senderId || d.message.senderId || ""
     });
+
+    if (
+      d.message.senderId !== me.id &&
+      activeConversationType === "group" &&
+      textMentionsMe(d.message.body)
+    ) {
+      playNotificationSound(true);
+      showMentionToast(d.message);
+      const groupConversation = (contacts || []).find(item => item.id === conversationId);
+      showConversationNotification({
+        id: conversationId,
+        type: "group",
+        group_name: groupConversation?.group_name || $("#convTitle").textContent,
+        last_sender_id: d.message.senderId,
+        last_sender_display_name: d.message.senderDisplayName,
+        last_message: d.message.body
+      }, { mentioned: true });
+    }
 
     if (!document.hidden) {
       try {
@@ -3301,6 +4399,9 @@ $("#logoutBtn").onclick = async () => {
   me = null;
   notificationBaselineReady = false;
   knownLastMessageIds.clear();
+  const notificationButton = $("#notificationSettingsBtn");
+  if (notificationButton) notificationButton.hidden = true;
+  groupMetaCache.clear();
   messageCache.clear();
   messageCacheConversation = null;
   clearReplyTarget();
@@ -4469,6 +5570,10 @@ function initGroupMembersUI() {
     <div class="group-dialog" role="dialog" aria-modal="true">
       <h3>\u7fa4\u6210\u5458\u7ba1\u7406</h3>
       <div id="groupMembersSummary" class="group-members-summary"></div>
+      <div id="groupAnnouncementView" class="group-announcement-view" hidden>
+        <b>\u7fa4\u516c\u544a</b>
+        <p id="groupAnnouncementViewText"></p>
+      </div>
 
       <div id="groupProfileArea" class="group-profile-area" hidden>
         <label>群名称
@@ -4535,6 +5640,10 @@ function initGroupMembersUI() {
 
     activeConversation = null;
     activeConversationType = null;
+    resetMessageHistory();
+    renderChatTools();
+    renderGroupMeta(null);
+    closeGroupFilesModal();
     setMobileChatView(false);
 
     document.getElementById("messages").innerHTML = "";
@@ -4562,6 +5671,16 @@ function initGroupMembersUI() {
 
       if (activeConversation !== conversationId || modal.hidden) return;
 
+      const meta = {
+        ...(groupMetaCache.get(conversationId) || {}),
+        name: data.name,
+        announcement: data.announcement,
+        ownerId: data.ownerId,
+        memberCount: Array.isArray(data.members) ? data.members.length : 0
+      };
+      groupMetaCache.set(conversationId, meta);
+      renderGroupMeta(meta);
+
       ownerId = data.ownerId;
 
       const list = document.getElementById("groupMembersList");
@@ -4577,6 +5696,14 @@ function initGroupMembersUI() {
       const groupAnnouncementInput = document.getElementById("groupAnnouncementInput");
 
       profileArea.hidden = !isManager;
+      const announcementView = document.getElementById("groupAnnouncementView");
+      const announcementViewText = document.getElementById("groupAnnouncementViewText");
+      if (announcementView) {
+        announcementView.hidden = isManager || !data.announcement;
+      }
+      if (announcementViewText) {
+        announcementViewText.textContent = data.announcement || "";
+      }
       if (document.activeElement !== groupNameInput) {
         groupNameInput.value = data.name || "";
       }
@@ -4779,6 +5906,13 @@ function initGroupMembersUI() {
           })
         }
       );
+      const saved = {
+        ...(groupMetaCache.get(conversationId) || {}),
+        name: document.getElementById("groupNameInput").value,
+        announcement: document.getElementById("groupAnnouncementInput").value
+      };
+      groupMetaCache.set(conversationId, saved);
+      renderGroupMeta(saved);
       errorBox.textContent = "群资料已保存";
       await refreshMembers();
       await loadContacts();
