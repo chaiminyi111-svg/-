@@ -2,8 +2,10 @@
 
 本目录保存「云聊 CloudChat」线上站点使用的前端文件，对应 Cloudflare Workers Assets 的 `public/` 目录副本，用于版本管理与回滚。
 
-- 线上地址：https://cloudchat.flat-water-8982.workers.dev
+- 主地址：https://chat.biegege.cc.cd
+- 备用地址：https://cloudchat.flat-water-8982.workers.dev
 - Worker 名称：`cloudchat`
+- 接入层：`cloudchat-edge`（见仓库根目录 `cloudchat-edge/`），负责自定义域名转发
 - 说明：后端 Worker 代码（Hono + Durable Objects）不在本仓库，这里只有浏览器端静态文件。
 
 ## 文件说明
@@ -25,6 +27,7 @@
 - 新增 favicon、iOS 图标、PWA manifest
 - 标签页显示未读数，例如 `(3) 云聊 CloudChat`
 - 顶部品牌改为中文优先：云聊 + CloudChat 副标
+- 增加 canonical 与绝对地址的 `og:url` / `og:image`，指向 `https://chat.biegege.cc.cd`
 - `app.js` 保持原样，仅 `index.html` / `style.css` 有改动
 
 ## 部署
