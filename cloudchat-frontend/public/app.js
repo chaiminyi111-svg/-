@@ -263,682 +263,10 @@ function checkNewMessageNotifications(conversations) {
   });
 }
 
-/* CLOUDCHAT_WEBRTC_FRONTEND_V1 */
-
-let callsSocket = null;
-let callSocketRetryTimer = null;
-let callSocketGeneration = 0;
-let callState = null;
-
-const CLOUDCHAT_STUN_SERVERS = [
-  { urls: "stun:stun.l.google.com:19302" }
-];
-
-function callSend(payload) {
-  if (!callsSocket || callsSocket.readyState !== WebSocket.OPEN) {
-    return false;
-  }
-
-  try {
-    callsSocket.send(JSON.stringify(payload));
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-function callSendSignal(type, extra = {}) {
-  if (!callState) return false;
-
-  return callSend({
-    type,
-    callId: callState.callId,
-    conversationId: callState.conversationId,
-    ...extra
-  });
-}
-
-function connectCallSocket() {
-  if (!me) return;
-
-  if (
-    callsSocket &&
-    [WebSocket.OPEN, WebSocket.CONNECTING].includes(callsSocket.readyState)
-  ) return;
-
-  if (callSocketRetryTimer) {
-    clearTimeout(callSocketRetryTimer);
-    callSocketRetryTimer = null;
-  }
-
-  const generation = ++callSocketGeneration;
-  const proto = location.protocol === "https:" ? "wss:" : "ws:";
-
-  let ws;
-
-  try {
-    ws = new WebSocket(`${proto}//${location.host}/ws/calls`);
-  } catch {
-    scheduleCallSocketReconnect(generation);
-    return;
-  }
-
-  callsSocket = ws;
-
-  ws.onmessage = event => {
-    let data;
-    try {
-      data = JSON.parse(event.data);
-    } catch {
-      return;
-    }
-    handleCallSignal(data);
-  };
-
-  ws.onclose = () => {
-    if (callsSocket === ws) callsSocket = null;
-    if (me && generation === callSocketGeneration) {
-      scheduleCallSocketReconnect(generation);
-    }
-  };
-
-  ws.onerror = () => {
-    try { ws.close(); } catch {}
-  };
-}
-
-function scheduleCallSocketReconnect(generation) {
-  if (!me || generation !== callSocketGeneration) return;
-
-  if (callSocketRetryTimer) clearTimeout(callSocketRetryTimer);
-
-  callSocketRetryTimer = setTimeout(() => {
-    callSocketRetryTimer = null;
-    if (me && generation === callSocketGeneration) connectCallSocket();
-  }, 2500);
-}
-
-function disconnectCallSocket() {
-  ++callSocketGeneration;
-
-  if (callSocketRetryTimer) {
-    clearTimeout(callSocketRetryTimer);
-    callSocketRetryTimer = null;
-  }
-
-  const ws = callsSocket;
-  callsSocket = null;
-
-  if (ws) {
-    try {
-      ws.onclose = null;
-      ws.close(1000, "logout");
-    } catch {}
-  }
-}
-
-function ensureCallUi() {
-  if ($("#cloudCallOverlay")) return;
-
-  const overlay = document.createElement("div");
-  overlay.id = "cloudCallOverlay";
-  overlay.className = "cloud-call-overlay";
-  overlay.hidden = true;
-
-  overlay.innerHTML = `
-    <div class="cloud-call-panel">
-      <div class="cloud-call-heading">
-        <div id="cloudCallName">通话</div>
-        <div id="cloudCallStatus">正在连接</div>
-      </div>
-      <div class="cloud-call-stage">
-        <video id="cloudCallRemoteVideo" autoplay playsinline></video>
-        <video id="cloudCallLocalVideo" autoplay muted playsinline></video>
-        <audio id="cloudCallRemoteAudio" autoplay></audio>
-      </div>
-      <div class="cloud-call-controls">
-        <button id="cloudCallAccept" type="button">接听</button>
-        <button id="cloudCallReject" type="button">拒绝</button>
-        <button id="cloudCallMute" type="button" hidden>静音</button>
-        <button id="cloudCallCamera" type="button" hidden>关闭摄像头</button>
-        <button id="cloudCallHangup" type="button">取消呼叫</button>
-      </div>
-    </div>
-  `;
-
-  document.body.appendChild(overlay);
-
-  $("#cloudCallAccept").onclick = acceptIncomingCall;
-  $("#cloudCallReject").onclick = rejectIncomingCall;
-  $("#cloudCallHangup").onclick = hangupCurrentCall;
-
-  $("#cloudCallMute").onclick = () => {
-    if (!callState?.localStream) return;
-    const tracks = callState.localStream.getAudioTracks();
-    if (!tracks.length) return;
-
-    const enabled = tracks.some(track => track.enabled);
-    tracks.forEach(track => track.enabled = !enabled);
-    $("#cloudCallMute").textContent = enabled ? "取消静音" : "静音";
-  };
-
-  $("#cloudCallCamera").onclick = () => {
-    if (!callState?.localStream) return;
-    const tracks = callState.localStream.getVideoTracks();
-    if (!tracks.length) return;
-
-    const enabled = tracks.some(track => track.enabled);
-    tracks.forEach(track => track.enabled = !enabled);
-    $("#cloudCallCamera").textContent =
-      enabled ? "开启摄像头" : "关闭摄像头";
-  };
-
-  if ($("#audioCallBtn")) {
-    $("#audioCallBtn").onclick = () => startOutgoingCall("audio");
-    $("#videoCallBtn").onclick = () => startOutgoingCall("video");
-  }
-}
-
-function renderCallActions() {
-  const actions = $("#callActions");
-  if (!actions) return;
-
-  const direct = !!activeConversation &&
-    activeConversationType === "direct";
-
-  actions.hidden = !direct;
-
-  const disabled = !direct || !!callState;
-  $("#audioCallBtn").disabled = disabled;
-  $("#videoCallBtn").disabled = disabled;
-}
-
-function getCallDisplayName(userId) {
-  const contact = (contacts || []).find(item =>
-    String(item.id || item.user_id || "") === String(userId)
-  );
-
-  return contact?.display_name || contact?.username || "好友";
-}
-
-function showCallUi() {
-  ensureCallUi();
-  if (!callState) return;
-
-  $("#cloudCallOverlay").hidden = false;
-  $("#cloudCallName").textContent = callState.displayName || "好友";
-  $("#cloudCallStatus").textContent = callState.statusText || "正在连接";
-
-  const isVideo = callState.mode === "video";
-  const incoming = callState.role === "callee" &&
-    callState.status === "ringing";
-  const ringing = callState.status === "ringing";
-
-  $("#cloudCallAccept").hidden = !incoming;
-  $("#cloudCallReject").hidden = !incoming;
-  $("#cloudCallMute").hidden = ringing;
-  $("#cloudCallCamera").hidden = ringing || !isVideo;
-
-  $("#cloudCallHangup").textContent =
-    callState.role === "caller" && ringing ? "取消呼叫" : "挂断";
-
-  $("#cloudCallLocalVideo").hidden = !isVideo;
-  $("#cloudCallRemoteVideo").hidden = !isVideo;
-
-  $("#cloudCallLocalVideo").srcObject = callState.localStream || null;
-  $("#cloudCallRemoteVideo").srcObject = callState.remoteStream || null;
-  $("#cloudCallRemoteAudio").srcObject = callState.remoteStream || null;
-
-  renderCallActions();
-}
-
-function setCallStatus(text) {
-  if (!callState) return;
-  callState.statusText = text;
-  if ($("#cloudCallStatus")) $("#cloudCallStatus").textContent = text;
-}
-
-async function startOutgoingCall(mode) {
-  if (!me || !activeConversation ||
-      activeConversationType !== "direct") return;
-
-  if (callState) {
-    alert("当前已有通话，请先结束当前通话");
-    return;
-  }
-
-  if (!callsSocket || callsSocket.readyState !== WebSocket.OPEN) {
-    alert("通话连接尚未建立，请稍后重试");
-    connectCallSocket();
-    return;
-  }
-
-  if (!navigator.mediaDevices?.getUserMedia) {
-    alert("当前浏览器不支持音视频通话");
-    return;
-  }
-
-  let stream;
-
-  try {
-    stream = await navigator.mediaDevices.getUserMedia({
-      audio: true,
-      video: mode === "video"
-    });
-  } catch (error) {
-    alert(
-      error.name === "NotAllowedError"
-        ? "请允许浏览器使用麦克风和摄像头"
-        : "无法获取麦克风或摄像头：" + (error.message || "未知错误")
-    );
-    return;
-  }
-
-  if (!activeConversation || activeConversationType !== "direct") {
-    stream.getTracks().forEach(track => track.stop());
-    return;
-  }
-
-  callState = {
-    callId: crypto.randomUUID().replace(/-/g, ""),
-    conversationId: activeConversation,
-    mode,
-    role: "caller",
-    status: "ringing",
-    statusText: "正在呼叫…",
-    displayName: $("#convTitle").textContent || "好友",
-    localStream: stream,
-    remoteStream: null,
-    pc: null,
-    pendingIce: [],
-    timeout: null
-  };
-
-  showCallUi();
-
-  if (!callSendSignal("call_invite", { mode })) {
-    finishCall(false);
-    alert("呼叫发送失败，请检查通话连接");
-    return;
-  }
-
-  callState.timeout = setTimeout(() => {
-    if (callState?.status === "ringing") {
-      callSendSignal("call_cancel");
-      finishCall(false);
-      alert("对方暂时没有接听");
-    }
-  }, 120000);
-}
-
-async function acceptIncomingCall() {
-  if (!callState || callState.role !== "callee" ||
-      callState.status !== "ringing") return;
-
-  let stream;
-
-  try {
-    stream = await navigator.mediaDevices.getUserMedia({
-      audio: true,
-      video: callState.mode === "video"
-    });
-  } catch (error) {
-    alert(
-      error.name === "NotAllowedError"
-        ? "请允许浏览器使用麦克风和摄像头"
-        : "无法获取麦克风或摄像头：" + (error.message || "未知错误")
-    );
-    callSendSignal("call_reject");
-    finishCall(false);
-    return;
-  }
-
-  if (!callState || callState.role !== "callee") {
-    stream.getTracks().forEach(track => track.stop());
-    return;
-  }
-
-  callState.localStream = stream;
-  callState.status = "active";
-  callState.statusText = "已接听，正在建立连接…";
-
-  if (callState.timeout) clearTimeout(callState.timeout);
-
-  if (!callSendSignal("call_accept")) {
-    finishCall(false);
-    alert("接听失败，通话连接已断开");
-    return;
-  }
-
-  showCallUi();
-}
-
-function rejectIncomingCall() {
-  if (!callState || callState.role !== "callee") return;
-  callSendSignal("call_reject");
-  finishCall(false);
-}
-
-function hangupCurrentCall() {
-  if (!callState) return;
-
-  if (callState.status === "ringing") {
-    callSendSignal(
-      callState.role === "caller" ? "call_cancel" : "call_reject"
-    );
-  } else {
-    callSendSignal("call_end");
-  }
-
-  finishCall(false);
-}
-
-function finishCall(sendSignal = false) {
-  if (!callState) return;
-
-  const old = callState;
-
-  if (sendSignal) {
-    callSendSignal(old.status === "ringing"
-      ? (old.role === "caller" ? "call_cancel" : "call_reject")
-      : "call_end");
-  }
-
-  callState = null;
-
-  if (old.timeout) clearTimeout(old.timeout);
-
-  if (old.pc) {
-    try {
-      old.pc.ontrack = null;
-      old.pc.onicecandidate = null;
-      old.pc.close();
-    } catch {}
-  }
-
-  if (old.localStream) {
-    old.localStream.getTracks().forEach(track => {
-      try { track.stop(); } catch {}
-    });
-  }
-
-  if ($("#cloudCallOverlay")) {
-    $("#cloudCallOverlay").hidden = true;
-    $("#cloudCallLocalVideo").srcObject = null;
-    $("#cloudCallRemoteVideo").srcObject = null;
-    $("#cloudCallRemoteAudio").srcObject = null;
-  }
-
-  renderCallActions();
-}
-
-async function createCallPeerConnection(isCaller) {
-  if (!callState) return null;
-  if (callState.pc) return callState.pc;
-
-  const pc = new RTCPeerConnection({
-    iceServers: CLOUDCHAT_STUN_SERVERS
-  });
-
-  callState.pc = pc;
-
-  if (callState.localStream) {
-    callState.localStream.getTracks().forEach(track => {
-      pc.addTrack(track, callState.localStream);
-    });
-  }
-
-  pc.onicecandidate = event => {
-    if (!event.candidate || !callState) return;
-    callSendSignal("webrtc_ice", {
-      candidate: event.candidate.toJSON()
-    });
-  };
-
-  pc.ontrack = event => {
-    if (!callState) return;
-
-    const stream = event.streams?.[0];
-    if (stream) {
-      callState.remoteStream = stream;
-      $("#cloudCallRemoteVideo").srcObject = stream;
-      $("#cloudCallRemoteAudio").srcObject = stream;
-    }
-
-    setCallStatus("通话已连接");
-  };
-
-  pc.onconnectionstatechange = () => {
-    if (!callState || callState.pc !== pc) return;
-
-    if (pc.connectionState === "connected") {
-      setCallStatus("通话已连接");
-    } else if (pc.connectionState === "connecting") {
-      setCallStatus("正在建立音视频连接…");
-    } else if (pc.connectionState === "failed") {
-      setCallStatus("连接失败，请检查网络或稍后重试");
-    }
-  };
-
-  if (isCaller) {
-    const offer = await pc.createOffer();
-    await pc.setLocalDescription(offer);
-
-    if (!callState || callState.pc !== pc) return null;
-
-    if (!callSendSignal("webrtc_offer", {
-      description: {
-        type: pc.localDescription.type,
-        sdp: pc.localDescription.sdp
-      }
-    })) {
-      throw new Error("无法发送视频通话邀请");
-    }
-  }
-
-  return pc;
-}
-
-async function flushPendingCallIce() {
-  if (!callState?.pc?.remoteDescription) return;
-
-  const pending = callState.pendingIce.splice(0);
-
-  for (const candidate of pending) {
-    try {
-      await callState.pc.addIceCandidate(new RTCIceCandidate(candidate));
-    } catch (error) {
-      console.warn("ICE candidate 添加失败：", error);
-    }
-  }
-}
-
-async function handleCallSignal(data) {
-  if (!data || typeof data !== "object") return;
-
-  if (data.type === "call_error") {
-    if (callState && data.callId === callState.callId) {
-      const message = data.message || "通话操作失败";
-      finishCall(false);
-      alert(message);
-    }
-    return;
-  }
-
-  if (data.type === "call_invite") {
-    if (callState) {
-      callSend({
-        type: "call_reject",
-        callId: data.callId,
-        conversationId: data.conversationId
-      });
-      return;
-    }
-
-    if (!data.callId || !data.conversationId ||
-        !["audio", "video"].includes(data.mode)) return;
-
-    callState = {
-      callId: data.callId,
-      conversationId: data.conversationId,
-      mode: data.mode,
-      role: "callee",
-      status: "ringing",
-      statusText: data.mode === "video"
-        ? "邀请你进行视频通话"
-        : "邀请你进行语音通话",
-      displayName: getCallDisplayName(data.fromUserId),
-      localStream: null,
-      remoteStream: null,
-      pc: null,
-      pendingIce: [],
-      timeout: null
-    };
-
-    callState.timeout = setTimeout(() => {
-      if (callState?.role === "callee" &&
-          callState.status === "ringing") {
-        callSendSignal("call_reject");
-        finishCall(false);
-      }
-    }, 120000);
-
-    showCallUi();
-    return;
-  }
-
-  if (!callState || data.callId !== callState.callId) return;
-
-  if (data.type === "call_accept") {
-    if (callState.role !== "caller") return;
-
-    callState.status = "active";
-    if (callState.timeout) clearTimeout(callState.timeout);
-
-    setCallStatus("对方已接听，正在建立连接…");
-
-    try {
-      await createCallPeerConnection(true);
-    } catch (error) {
-      console.error("创建通话连接失败：", error);
-      callSendSignal("call_end");
-      finishCall(false);
-      alert("建立通话连接失败：" + (error.message || "未知错误"));
-    }
-    return;
-  }
-
-  if (["call_reject", "call_cancel", "call_end"].includes(data.type)) {
-    const message =
-      data.type === "call_reject" ? "对方拒绝了通话" :
-      data.type === "call_cancel" ? "对方取消了呼叫" :
-      "通话已结束";
-
-    finishCall(false);
-
-    if (data.type !== "call_end") alert(message);
-    return;
-  }
-
-  if (data.type === "webrtc_offer") {
-    if (callState.role !== "callee" ||
-        !data.description ||
-        data.description.type !== "offer") return;
-
-    try {
-      const pc = await createCallPeerConnection(false);
-      if (!pc || !callState) return;
-
-      await pc.setRemoteDescription(
-        new RTCSessionDescription(data.description)
-      );
-
-      await flushPendingCallIce();
-
-      const answer = await pc.createAnswer();
-      await pc.setLocalDescription(answer);
-
-      if (!callState || callState.pc !== pc) return;
-
-      if (!callSendSignal("webrtc_answer", {
-        description: {
-          type: pc.localDescription.type,
-          sdp: pc.localDescription.sdp
-        }
-      })) throw new Error("无法发送通话应答");
-
-      setCallStatus("正在连接对方…");
-    } catch (error) {
-      console.error("处理 WebRTC offer 失败：", error);
-      callSendSignal("call_end");
-      finishCall(false);
-      alert("建立音视频连接失败：" + (error.message || "未知错误"));
-    }
-    return;
-  }
-
-  if (data.type === "webrtc_answer") {
-    if (callState.role !== "caller" ||
-        !data.description ||
-        data.description.type !== "answer" ||
-        !callState.pc) return;
-
-    try {
-      await callState.pc.setRemoteDescription(
-        new RTCSessionDescription(data.description)
-      );
-      await flushPendingCallIce();
-      setCallStatus("正在连接对方…");
-    } catch (error) {
-      console.error("处理 WebRTC answer 失败：", error);
-      callSendSignal("call_end");
-      finishCall(false);
-      alert("通话应答处理失败");
-    }
-    return;
-  }
-
-  if (data.type === "webrtc_ice") {
-    if (!data.candidate) return;
-
-    if (!callState.pc || !callState.pc.remoteDescription) {
-      callState.pendingIce.push(data.candidate);
-      return;
-    }
-
-    try {
-      await callState.pc.addIceCandidate(
-        new RTCIceCandidate(data.candidate)
-      );
-    } catch (error) {
-      console.warn("接收 ICE candidate 失败：", error);
-    }
-  }
-}
-
-ensureCallUi();
-renderCallActions();
-
-window.addEventListener("beforeunload", () => {
-  if (callState?.status === "active") {
-    callSendSignal("call_end");
-  } else if (callState?.status === "ringing") {
-    callSendSignal(
-      callState.role === "caller" ? "call_cancel" : "call_reject"
-    );
-  }
-
-  if (callState?.localStream) {
-    callState.localStream.getTracks().forEach(track => track.stop());
-  }
-
-  try { callState?.pc?.close(); } catch {}
-});
 async function boot() {
   try {
     const d = await api("/api/me");
     me = d.user;
-    connectCallSocket();
     notificationBaselineReady = false;
     knownLastMessageIds.clear();
     api("/api/presence/heartbeat", { method: "POST" }).catch(() => {});
@@ -1476,7 +804,6 @@ async function openDirect(contact) {
     activeConversation = conversationId;
     activeConversationType = "direct";
   connectSocket();
-    renderCallActions();
   $("#messageInput").value = conversationDrafts.get(String(activeConversation)) || "";
 
     $("#convTitle").textContent = contact.display_name || contact.username;
@@ -1551,7 +878,6 @@ async function openGroup(conv) {
   activeConversation = conversationId;
   activeConversationType = "group";
   connectSocket();
-  renderCallActions();
   $("#messageInput").value = conversationDrafts.get(String(activeConversation)) || "";
   $("#messages").innerHTML = "";
 
@@ -2603,7 +1929,17 @@ calculatorButton.addEventListener("click", () => {
   openChatCalculator();
 });
 
-const actions = [calculatorButton, redButton, imageButton, fileButton];
+const cameraButton = document.createElement("button");
+cameraButton.type = "button";
+cameraButton.id = "cameraButton";
+cameraButton.textContent = "拍照";
+cameraButton.title = "拍照并发送";
+cameraButton.addEventListener("click", () => {
+  if (typeof closeComposerMenu === "function") closeComposerMenu();
+  openCamera();
+});
+
+const actions = [calculatorButton, redButton, cameraButton, imageButton, fileButton];
 
   actions.forEach(button => {
     if (!button) return;
@@ -3507,6 +2843,227 @@ cloudChatVoiceButton.addEventListener("pointercancel", () => {
 cloudChatVoiceButton.addEventListener("contextmenu", event => {
   event.preventDefault();
 });
+async function uploadImageBlob(file) {
+  if (!file || file.size <= 0 || file.size > 8 * 1024 * 1024) {
+    throw new Error("图片大小不能超过 8 MB");
+  }
+  if (!["image/jpeg", "image/png", "image/webp", "image/gif"].includes(file.type)) {
+    throw new Error("只支持 JPEG、PNG、WebP、GIF 图片");
+  }
+  if (!activeConversation) {
+    throw new Error("请先打开一个聊天");
+  }
+
+  const conversationId = activeConversation;
+  const form = new FormData();
+  form.append("file", file);
+
+  const response = await fetch(
+    `/api/conversations/${encodeURIComponent(conversationId)}/images`,
+    {
+      method: "POST",
+      credentials: "same-origin",
+      body: form
+    }
+  );
+
+  const result = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(result.error || `上传失败 (${response.status})`);
+  }
+
+  if (activeConversation === conversationId) {
+    await loadMessages();
+    await loadContacts();
+  }
+}
+
+let cameraStream = null;
+let cameraFacing = "environment";
+let cameraPhotoBlob = null;
+let cameraPreviewUrl = "";
+
+function ensureCameraUi() {
+  if ($("#cameraOverlay")) return;
+
+  const overlay = document.createElement("div");
+  overlay.id = "cameraOverlay";
+  overlay.className = "camera-overlay";
+  overlay.hidden = true;
+  overlay.innerHTML = [
+    '<div class="camera-panel" role="dialog" aria-modal="true" aria-label="拍照">',
+    '  <div class="camera-head"><strong>拍照</strong><button type="button" id="cameraClose" class="camera-close" aria-label="关闭">×</button></div>',
+    '  <div class="camera-stage">',
+    '    <video id="cameraVideo" autoplay playsinline muted></video>',
+    '    <img id="cameraPreview" alt="拍摄预览" hidden>',
+    '  </div>',
+    '  <div class="camera-actions">',
+    '    <button type="button" id="cameraSwitch" class="camera-btn">切换摄像头</button>',
+    '    <button type="button" id="cameraShoot" class="camera-btn primary">拍照</button>',
+    '    <button type="button" id="cameraRetake" class="camera-btn" hidden>重拍</button>',
+    '    <button type="button" id="cameraSend" class="camera-btn primary" hidden>发送</button>',
+    '  </div>',
+    '  <p class="camera-hint" id="cameraHint"></p>',
+    '</div>'
+  ].join("");
+  document.body.appendChild(overlay);
+
+  $("#cameraClose").onclick = closeCamera;
+  $("#cameraShoot").onclick = capturePhoto;
+  $("#cameraRetake").onclick = retakePhoto;
+  $("#cameraSend").onclick = sendCameraPhoto;
+  $("#cameraSwitch").onclick = switchCamera;
+  overlay.addEventListener("click", event => {
+    if (event.target === overlay) closeCamera();
+  });
+  document.addEventListener("keydown", event => {
+    if (event.key === "Escape" && !overlay.hidden) closeCamera();
+  });
+}
+
+function stopCameraStream() {
+  if (cameraStream) {
+    cameraStream.getTracks().forEach(track => track.stop());
+    cameraStream = null;
+  }
+  const video = $("#cameraVideo");
+  if (video) video.srcObject = null;
+}
+
+function clearCameraPreview() {
+  if (cameraPreviewUrl) {
+    URL.revokeObjectURL(cameraPreviewUrl);
+    cameraPreviewUrl = "";
+  }
+  const img = $("#cameraPreview");
+  if (img) {
+    img.hidden = true;
+    img.removeAttribute("src");
+  }
+  cameraPhotoBlob = null;
+}
+
+async function startCamera(facing) {
+  stopCameraStream();
+  clearCameraPreview();
+
+  const video = $("#cameraVideo");
+  const hint = $("#cameraHint");
+  video.hidden = false;
+  $("#cameraShoot").hidden = false;
+  $("#cameraSwitch").hidden = false;
+  $("#cameraRetake").hidden = true;
+  $("#cameraSend").hidden = true;
+  $("#cameraShoot").disabled = false;
+  hint.textContent = "正在打开摄像头…";
+
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    $("#cameraShoot").disabled = true;
+    hint.textContent = "当前浏览器不支持摄像头，请改用图片上传";
+    return;
+  }
+
+  try {
+    cameraStream = await navigator.mediaDevices.getUserMedia({
+      video: {
+        facingMode: { ideal: facing },
+        width: { ideal: 1280 },
+        height: { ideal: 720 }
+      },
+      audio: false
+    });
+    video.srcObject = cameraStream;
+    hint.textContent = "";
+  } catch (error) {
+    $("#cameraShoot").disabled = true;
+    hint.textContent = "无法打开摄像头：" + (error.message || "请检查浏览器权限");
+  }
+}
+
+function openCamera() {
+  if (!activeConversation) {
+    alert("请先打开一个聊天");
+    return;
+  }
+  ensureCameraUi();
+  $("#cameraOverlay").hidden = false;
+  startCamera(cameraFacing);
+}
+
+function closeCamera() {
+  stopCameraStream();
+  clearCameraPreview();
+  const overlay = $("#cameraOverlay");
+  if (overlay) overlay.hidden = true;
+  const send = $("#cameraSend");
+  if (send) {
+    send.disabled = false;
+    send.textContent = "发送";
+  }
+}
+
+function switchCamera() {
+  cameraFacing = cameraFacing === "environment" ? "user" : "environment";
+  startCamera(cameraFacing);
+}
+
+function capturePhoto() {
+  const video = $("#cameraVideo");
+  if (!video || !video.videoWidth || !video.videoHeight) {
+    alert("摄像头还没有准备好");
+    return;
+  }
+
+  const maxSide = 1600;
+  const scale = Math.min(1, maxSide / Math.max(video.videoWidth, video.videoHeight));
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.round(video.videoWidth * scale);
+  canvas.height = Math.round(video.videoHeight * scale);
+  canvas.getContext("2d").drawImage(video, 0, 0, canvas.width, canvas.height);
+
+  canvas.toBlob(blob => {
+    if ($("#cameraOverlay").hidden) return;
+    if (!blob) {
+      alert("拍照失败，请重试");
+      return;
+    }
+    cameraPhotoBlob = blob;
+    cameraPreviewUrl = URL.createObjectURL(blob);
+    const img = $("#cameraPreview");
+    img.src = cameraPreviewUrl;
+    img.hidden = false;
+    video.hidden = true;
+    stopCameraStream();
+    $("#cameraShoot").hidden = true;
+    $("#cameraSwitch").hidden = true;
+    $("#cameraRetake").hidden = false;
+    $("#cameraSend").hidden = false;
+    $("#cameraHint").textContent = "预览确认后发送";
+  }, "image/jpeg", 0.9);
+}
+
+function retakePhoto() {
+  startCamera(cameraFacing);
+}
+
+async function sendCameraPhoto() {
+  if (!cameraPhotoBlob) return;
+  const blob = cameraPhotoBlob;
+  const send = $("#cameraSend");
+  send.disabled = true;
+  send.textContent = "发送中…";
+
+  try {
+    const file = new File([blob], `photo-${Date.now()}.jpg`, { type: "image/jpeg" });
+    await uploadImageBlob(file);
+    closeCamera();
+  } catch (error) {
+    alert(error.message || "拍照发送失败");
+    send.disabled = false;
+    send.textContent = "发送";
+  }
+}
+
 $("#imageButton").addEventListener("click", () => {
   if (!activeConversation) {
     alert("请先打开一个聊天");
@@ -3520,48 +3077,12 @@ $("#imageFileInput").addEventListener("change", async event => {
   if (!file) return;
   event.target.value = "";
 
-  if (file.size <= 0 || file.size > 8 * 1024 * 1024) {
-    alert("图片大小不能超过 8 MB");
-    return;
-  }
-
-  if (!["image/jpeg", "image/png", "image/webp", "image/gif"].includes(file.type)) {
-    alert("只支持 JPEG、PNG、WebP、GIF 图片");
-    return;
-  }
-
-  if (!activeConversation) {
-    alert("请先打开一个聊天");
-    return;
-  }
-
-  const conversationId = activeConversation;
   const button = $("#imageButton");
   button.disabled = true;
   button.textContent = "上传中";
 
   try {
-    const form = new FormData();
-    form.append("file", file);
-
-    const response = await fetch(
-      `/api/conversations/${encodeURIComponent(conversationId)}/images`,
-      {
-        method: "POST",
-        credentials: "same-origin",
-        body: form
-      }
-    );
-
-    const result = await response.json().catch(() => ({}));
-    if (!response.ok) {
-      throw new Error(result.error || `上传失败 (${response.status})`);
-    }
-
-    if (activeConversation === conversationId) {
-      await loadMessages();
-      await loadContacts();
-    }
+    await uploadImageBlob(file);
   } catch (error) {
     alert(error.message || "图片上传失败");
   } finally {
@@ -3635,8 +3156,7 @@ $("#logoutBtn").onclick = async () => {
   stopTyping();
   clearRemoteTyping();
   if (socket) socket.close();
-  finishCall(true);
-  disconnectCallSocket();
+  if ($("#cameraOverlay")) closeCamera();
   me = null;
   notificationBaselineReady = false;
   knownLastMessageIds.clear();

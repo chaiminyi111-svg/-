@@ -55,5 +55,6 @@ wrangler deploy
 - 优化前版本：`c2799ab0-3d8a-4a8c-ae55-b00e47ac1680`（deployment `c946d360-edd1-4652-8f52-5138f3f75131`）
 - 仅后端优化：`c8aa03213cb5412a8385aa90ca99ae8f`
 - 前端 + 后端优化：`d7d076bcb1614c3f8049d1b214d6f567`
+- 前端取消通话/新增拍照：`7a6982f039e344529bd1d4916843a3bc`（脚本未变）
 
 Cloudflare 控制台 → Workers & Pages → `cloudchat` → 部署 → 选择版本回滚。

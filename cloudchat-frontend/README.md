@@ -14,7 +14,7 @@
 | --- | --- |
 | `public/index.html` | 页面结构、标题、meta、图标与 manifest 引用 |
 | `public/style.css` | 样式（含品牌区与可访问性补充） |
-| `public/app.js` | 前端逻辑（含发送后本地乐观渲染） |
+| `public/app.js` | 前端逻辑（含本地乐观渲染、拍照与图片上传） |
 | `public/favicon.svg` | 站点图标 |
 | `public/icon-192.png` / `public/icon-512.png` | PWA 图标 |
 | `public/apple-touch-icon.png` | iOS 主屏图标 |
@@ -30,6 +30,9 @@
 - 增加 canonical 与绝对地址的 `og:url` / `og:image`，指向 `https://chat.biegege.cc.cd`
 - `app.js`：发送消息后先本地渲染 pending 气泡，收到 WebSocket 回显后替换；20 秒未收到回显自动移除
 - 后端同步减少消息链路上的 D1 查询，详见 `cloudchat-worker/README.md`
+- 取消语音/视频通话入口，移除前端 WebRTC 信令与通话浮层；后端 `/ws/calls` 信令保留但不再使用
+- 新增「拍照」：摄像头预览、前后摄像头切换、拍照预览、重拍，确认后上传
+- 图片上传逻辑抽取为 `uploadImageBlob()`，图片选择与拍照共用
 
 ## 部署
 
@@ -46,3 +49,4 @@
 - 2026-11-25 品牌与域名改动前的版本 ID：`61374142-b523-4dbc-9c02-4f23f3e72d1a`
 - 2026-11-25 延迟优化前的版本 ID：`c2799ab0-3d8a-4a8c-ae55-b00e47ac1680`
 - 延迟优化后的版本 ID：`d7d076bcb1614c3f8049d1b214d6f567`
+- 取消通话并新增拍照后的版本 ID：`7a6982f039e344529bd1d4916843a3bc`

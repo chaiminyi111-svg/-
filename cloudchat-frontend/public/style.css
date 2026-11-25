@@ -2121,127 +2121,6 @@
   }
 }
 
-/* CLOUDCHAT_WEBRTC_FRONTEND_CSS_V1 */
-.call-actions {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  flex: 0 0 auto;
-}
-.call-actions[hidden] {
-  display: none !important;
-}
-.call-actions button {
-  padding: 6px 10px;
-  font-size: 12px;
-  border-color: #d9e8df;
-  color: #079447;
-  background: #f3faf5;
-  white-space: nowrap;
-}
-.call-actions button:disabled {
-  opacity: .45;
-  cursor: not-allowed;
-}
-.cloud-call-overlay {
-  position: fixed;
-  inset: 0;
-  z-index: 10000;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 18px;
-  background: rgba(0, 0, 0, .58);
-}
-.cloud-call-overlay[hidden] {
-  display: none !important;
-}
-.cloud-call-panel {
-  width: min(520px, 100%);
-  max-height: min(90dvh, 760px);
-  overflow: auto;
-  background: #fff;
-  border-radius: 18px;
-  padding: 22px;
-  box-shadow: 0 18px 70px rgba(0, 0, 0, .25);
-}
-.cloud-call-heading {
-  text-align: center;
-  margin-bottom: 18px;
-}
-#cloudCallName {
-  font-size: 20px;
-  font-weight: 700;
-}
-#cloudCallStatus {
-  margin-top: 8px;
-  color: #888;
-  font-size: 13px;
-}
-.cloud-call-stage {
-  position: relative;
-  min-height: 180px;
-  overflow: hidden;
-  border-radius: 14px;
-  background: #20252a;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-#cloudCallRemoteVideo {
-  width: 100%;
-  max-height: 52dvh;
-  object-fit: contain;
-}
-#cloudCallLocalVideo {
-  position: absolute;
-  right: 12px;
-  bottom: 12px;
-  width: 112px;
-  max-height: 150px;
-  object-fit: cover;
-  border: 2px solid white;
-  border-radius: 10px;
-  background: #333;
-}
-.cloud-call-controls {
-  display: flex;
-  justify-content: center;
-  flex-wrap: wrap;
-  gap: 10px;
-  margin-top: 20px;
-}
-.cloud-call-controls button {
-  min-width: 82px;
-  padding: 10px 14px;
-  border-radius: 22px;
-}
-#cloudCallAccept {
-  color: white;
-  background: #07c160;
-  border-color: #07c160;
-}
-#cloudCallReject,
-#cloudCallHangup {
-  color: white;
-  background: #e5484d;
-  border-color: #e5484d;
-}
-@media(max-width: 650px) {
-  .call-actions { gap: 4px; }
-  .call-actions button {
-    padding: 6px 7px;
-    font-size: 11px;
-  }
-  .cloud-call-panel {
-    padding: 16px;
-    border-radius: 14px;
-  }
-  #cloudCallLocalVideo {
-    width: 88px;
-    max-height: 120px;
-  }
-}
 /* Keep native hidden elements hidden even inside grid/flex layouts. */
 [hidden] {
   display: none !important;
@@ -2342,3 +2221,100 @@
 ::selection{background:#07c160;color:#fff}
 :focus-visible{outline:2px solid #07c160;outline-offset:2px}
 @media (max-width:420px){.brand-en{display:none}.brand small{max-width:46vw}}
+
+/* 拍照 */
+.camera-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 10000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 18px;
+  background: rgba(0, 0, 0, .62);
+}
+.camera-overlay[hidden] {
+  display: none !important;
+}
+.camera-panel {
+  width: min(560px, 100%);
+  background: #fff;
+  border-radius: 18px;
+  padding: 18px;
+  box-shadow: 0 18px 70px rgba(0, 0, 0, .28);
+}
+.camera-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
+.camera-head strong {
+  font-size: 17px;
+}
+.camera-close {
+  border: 0;
+  background: transparent;
+  color: #666;
+  font-size: 24px;
+  line-height: 1;
+  padding: 2px 6px;
+}
+.camera-stage {
+  position: relative;
+  aspect-ratio: 4 / 3;
+  overflow: hidden;
+  border-radius: 12px;
+  background: #111;
+}
+.camera-stage video,
+.camera-stage img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+.camera-actions {
+  display: flex;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 14px;
+}
+.camera-btn {
+  padding: 9px 18px;
+  border-radius: 20px;
+  border: 1px solid #d9e8df;
+  background: #f3faf5;
+  color: #079447;
+  font-size: 14px;
+}
+.camera-btn.primary {
+  background: #07c160;
+  border-color: #07c160;
+  color: #fff;
+}
+.camera-btn:disabled {
+  opacity: .55;
+  cursor: not-allowed;
+}
+.camera-hint {
+  min-height: 18px;
+  margin: 10px 0 0;
+  color: #888;
+  font-size: 12px;
+  text-align: center;
+}
+@media (max-width: 650px) {
+  .camera-panel {
+    padding: 14px;
+    border-radius: 14px;
+  }
+  .camera-actions {
+    gap: 8px;
+  }
+  .camera-btn {
+    flex: 1 1 auto;
+    padding: 9px 12px;
+  }
+}
