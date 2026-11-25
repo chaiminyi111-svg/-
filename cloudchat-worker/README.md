@@ -7,7 +7,7 @@
 - 部署账号：`办公工具`（`49650577f4aafa8e1b1189f67a23bc78`）
 - Worker 名称：`cloudchat`
 
-> `index.js` 是 2026-11-25 延迟优化后的部署产物；原始 TypeScript 源码不在本仓库。
+> `index.js` 是 2026-11-25 延迟优化与引用回复后的部署产物；原始 TypeScript 源码不在本仓库。
 
 ## 2026-11-25 延迟优化
 
@@ -35,10 +35,14 @@
 | --- | --- | --- |
 | Assets | `ASSETS` | 前端静态资源 |
 | Durable Object | `CHAT_ROOM` → `ChatRoom` | 会话 WebSocket |
-| Durable Object | `CALL_ROOM` → `CallRoom` | 通话信令 |
+| Durable Object | `CALL_ROOM` → `CallRoom` | 通话信令（前端已无入口） |
 | D1 | `DB` | 业务数据库 |
 | R2 | `CHAT_IMAGES` → `cloudchat-images` | 图片、语音、文件 |
 | Secret | `BOOTSTRAP_SECRET` | 初始化密钥，不在仓库中 |
+
+## 数据库变更
+
+- 2026-11-25：`ALTER TABLE messages ADD COLUMN reply_to TEXT;`（引用回复，已应用到线上 D1）
 
 ## 部署
 
