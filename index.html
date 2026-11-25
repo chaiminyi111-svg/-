@@ -112,7 +112,8 @@
 
   .controls {
     display: flex;
-    gap: 12px;
+    flex-wrap: wrap;
+    gap: 10px;
     justify-content: center;
     margin-bottom: 28px;
   }
@@ -120,31 +121,37 @@
   .btn {
     border: 0;
     border-radius: 12px;
-    padding: 13px 30px;
+    padding: 13px 22px;
     font-size: 15px;
     font-family: inherit;
     cursor: pointer;
-    transition: transform .12s, filter .2s, background .2s;
+    transition: transform .12s, filter .2s, background .2s, opacity .2s;
   }
 
-  .btn:active { transform: scale(.97); }
+  .btn:active:not(:disabled) { transform: scale(.97); }
+
+  .btn:disabled {
+    cursor: default;
+    opacity: .42;
+    transform: none;
+  }
 
   .btn-primary {
     background: var(--accent);
     color: #12141a;
     font-weight: 600;
-    flex: 1;
-    max-width: 190px;
+    flex: 1.25;
   }
 
-  .btn-primary:hover { filter: brightness(1.08); }
+  .btn-primary:hover:not(:disabled) { filter: brightness(1.08); }
 
   .btn-ghost {
+    flex: 1;
     background: var(--card);
     color: var(--text);
   }
 
-  .btn-ghost:hover { background: #262b36; }
+  .btn-ghost:hover:not(:disabled) { background: #262b36; }
 
   .stats {
     display: flex;
@@ -213,6 +220,7 @@
 
   <div class="controls">
     <button class="btn btn-primary" id="start">开始</button>
+    <button class="btn btn-ghost" id="pause" disabled>暂停</button>
     <button class="btn btn-ghost" id="reset">重置</button>
   </div>
 
@@ -238,6 +246,7 @@
     progress: document.getElementById("progress"),
     modeLabel: document.getElementById("mode-label"),
     start: document.getElementById("start"),
+    pause: document.getElementById("pause"),
     reset: document.getElementById("reset"),
     count: document.getElementById("count"),
     dots: document.getElementById("dots"),
@@ -319,6 +328,8 @@
     els.tabFocus.setAttribute("aria-selected", String(isFocus));
     els.tabBreak.setAttribute("aria-selected", String(!isFocus));
     els.start.textContent = "开始";
+    els.start.disabled = false;
+    els.pause.disabled = true;
     render();
   }
 
@@ -339,7 +350,9 @@
     endAt = Date.now() + remaining * 1000;
     clearInterval(ticker);
     ticker = setInterval(tick, 200);
-    els.start.textContent = "暂停";
+    els.start.textContent = "进行中";
+    els.start.disabled = true;
+    els.pause.disabled = false;
     render();
   }
 
@@ -350,6 +363,8 @@
     clearInterval(ticker);
     ticker = null;
     els.start.textContent = "继续";
+    els.start.disabled = false;
+    els.pause.disabled = true;
     render();
   }
 
@@ -359,6 +374,8 @@
     running = false;
     remaining = total;
     els.start.textContent = "开始";
+    els.start.disabled = false;
+    els.pause.disabled = true;
     render();
   }
 
@@ -420,10 +437,8 @@
     });
   }
 
-  els.start.addEventListener("click", function () {
-    if (running) pause(); else start();
-  });
-
+  els.start.addEventListener("click", start);
+  els.pause.addEventListener("click", pause);
   els.reset.addEventListener("click", reset);
 
   els.tabFocus.addEventListener("click", function () {
