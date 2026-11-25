@@ -106,8 +106,8 @@ class TelegramClient {
     return data.result;
   }
 
-  getMe() {
-    return this.request("getMe", {});
+  getMe(options = {}) {
+    return this.request("getMe", {}, options);
   }
 
   getUpdates(offset, timeout, signal) {
@@ -305,19 +305,25 @@ function extractContent(message) {
 }
 
 function createTelegramService({ db, config, logger, broadcaster }) {
+  const storedToken = getSetting(db, "telegram_bot_token", null);
+  const initialToken = storedToken !== null ? storedToken : config.telegramToken;
   const client = new TelegramClient({
-    token: config.telegramToken,
+    token: initialToken,
     apiBase: config.telegramApiBase,
     logger
   });
 
-  const tokenKey = client.configured
-    ? "telegram_offset_" + sha256(config.telegramToken).slice(0, 16)
+  let tokenSource = storedToken !== null
+    ? "database"
+    : (config.telegramToken ? "environment" : "none");
+  let tokenKey = client.configured
+    ? "telegram_offset_" + sha256(client.token).slice(0, 16)
     : "telegram_offset_disabled";
   let offset = Number(getSetting(db, tokenKey, "0")) || 0;
   let running = false;
   let loopPromise = null;
   let abortController = null;
+  let updateQueue = Promise.resolve();
 
   function emit(event) {
     if (typeof broadcaster === "function") broadcaster(event);
@@ -656,9 +662,74 @@ function createTelegramService({ db, config, logger, broadcaster }) {
     abortController = null;
   }
 
+  function normalizeBotInfo(info) {
+    if (!info || info.id === undefined || info.id === null) return null;
+    return {
+      id: String(info.id),
+      username: info.username ? String(info.username) : "",
+      firstName: info.first_name ? String(info.first_name) : ""
+    };
+  }
+
+  async function validateToken(nextToken) {
+    const token = String(nextToken || "").trim();
+    if (!token) throw new TelegramError("请输入 Telegram Bot Token", "NOT_CONFIGURED");
+    if (token.length > 200) throw new TelegramError("Telegram Bot Token 过长", "INVALID_TOKEN");
+
+    const probe = new TelegramClient({
+      token,
+      apiBase: config.telegramApiBase,
+      logger
+    });
+    const info = normalizeBotInfo(await probe.getMe());
+    if (!info) throw new TelegramError("Telegram 未返回有效的机器人信息", "BAD_RESPONSE");
+    return info;
+  }
+
+  async function getBotInfo() {
+    if (!client.configured) return null;
+    return normalizeBotInfo(await client.getMe({ timeoutMs: 10000 }));
+  }
+
+  function updateToken(nextToken) {
+    const task = updateQueue.then(async () => {
+      const token = String(nextToken || "").trim();
+      await stop();
+      client.token = token;
+      tokenSource = token ? "database" : "none";
+      setSetting(db, "telegram_bot_token", token);
+      tokenKey = token
+        ? "telegram_offset_" + sha256(token).slice(0, 16)
+        : "telegram_offset_disabled";
+      offset = Number(getSetting(db, tokenKey, "0")) || 0;
+
+      if (!token) {
+        logger.info("Telegram Bot Token 已清除，接收消息已停用");
+        return { configured: false, running: false };
+      }
+
+      try {
+        await client.deleteWebhook();
+        logger.info("已删除 Telegram webhook，改用长轮询");
+      } catch (error) {
+        logger.warn("删除 Telegram webhook 失败", error.message);
+      }
+
+      const started = await start();
+      return { configured: client.configured, running: started };
+    });
+    updateQueue = task.catch(() => {});
+    return task;
+  }
+
   return {
     client,
-    configured: client.configured,
+    get configured() { return client.configured; },
+    get tokenSource() { return tokenSource; },
+    get running() { return running; },
+    validateToken,
+    getBotInfo,
+    updateToken,
     start,
     stop,
     ingestUpdate,

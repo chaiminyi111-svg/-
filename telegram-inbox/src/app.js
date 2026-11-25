@@ -300,6 +300,155 @@ function createApp({ db, config, telegram, whatsapp, broadcaster, logger }) {
     res.json({ ok: true });
   });
 
+  app.get("/api/admin/telegram", requireAdmin, asyncRoute(async (req, res) => {
+    let bot = null;
+    let warning = null;
+    if (telegram?.configured) {
+      try {
+        bot = await telegram.getBotInfo();
+      } catch (error) {
+        warning = error.message;
+      }
+    }
+    res.json({
+      telegram: {
+        configured: Boolean(telegram?.configured),
+        running: Boolean(telegram?.running),
+        source: telegram?.tokenSource || "none",
+        bot,
+        warning
+      }
+    });
+  }));
+
+  app.post("/api/admin/telegram", requireAdmin, asyncRoute(async (req, res) => {
+    const token = String(req.body?.token || "").trim();
+    if (!token) return jsonError(res, 400, "请输入 Telegram Bot Token");
+    if (token.length > 200) return jsonError(res, 400, "Telegram Bot Token 过长");
+
+    let bot;
+    try {
+      bot = await telegram.validateToken(token);
+    } catch (error) {
+      const status = error.code === "NETWORK_ERROR" ? 502 : 400;
+      return jsonError(res, status, error.message);
+    }
+
+    try {
+      await telegram.updateToken(token);
+    } catch (error) {
+      logger?.error("保存 Telegram Token 失败", error.message);
+      return jsonError(res, 500, "Token 已验证，但启动接收消息失败，请检查服务日志");
+    }
+
+    audit(db, req.user.id, "telegram.token_updated", "channel", "telegram", JSON.stringify({
+      botUsername: bot.username || null,
+      botId: bot.id
+    }));
+    res.json({
+      ok: true,
+      telegram: {
+        configured: Boolean(telegram.configured),
+        running: Boolean(telegram.running),
+        source: telegram.tokenSource || "none",
+        bot
+      }
+    });
+  }));
+
+  app.delete("/api/admin/telegram", requireAdmin, asyncRoute(async (req, res) => {
+    try {
+      await telegram.updateToken("");
+    } catch (error) {
+      logger?.error("清除 Telegram Token 失败", error.message);
+      return jsonError(res, 500, "清除 Telegram Token 失败，请检查服务日志");
+    }
+
+    audit(db, req.user.id, "telegram.token_cleared", "channel", "telegram");
+    res.json({
+      ok: true,
+      telegram: {
+        configured: false,
+        running: false,
+        source: "none",
+        bot: null
+      }
+    });
+  }));
+
+  app.get("/api/admin/whatsapp", requireAdmin, asyncRoute(async (req, res) => {
+    let info = null;
+    let warning = null;
+    if (whatsapp?.configured) {
+      try {
+        info = await whatsapp.getInfo();
+      } catch (error) {
+        warning = error.message;
+      }
+    }
+    res.json({
+      whatsapp: {
+        configured: Boolean(whatsapp?.configured),
+        source: whatsapp?.source || "none",
+        phoneNumberId: whatsapp?.phoneNumberId || "",
+        hasVerifyToken: Boolean(whatsapp?.hasVerifyToken),
+        hasAppSecret: Boolean(whatsapp?.hasAppSecret),
+        info,
+        warning
+      }
+    });
+  }));
+
+  app.post("/api/admin/whatsapp", requireAdmin, asyncRoute(async (req, res) => {
+    const token = String(req.body?.token || "").trim();
+    const phoneNumberId = String(req.body?.phoneNumberId || "").trim();
+    const verifyToken = String(req.body?.verifyToken || "").trim();
+    const appSecret = String(req.body?.appSecret || "").trim();
+
+    if (!phoneNumberId) return jsonError(res, 400, "请填写 WhatsApp Phone Number ID");
+
+    let info;
+    try {
+      info = await whatsapp.updateCredentials({ token, phoneNumberId, verifyToken, appSecret });
+    } catch (error) {
+      const status = error.code === "NETWORK_ERROR" ? 502 : 400;
+      return jsonError(res, status, error.message);
+    }
+
+    audit(db, req.user.id, "whatsapp.credentials_updated", "channel", "whatsapp", JSON.stringify({
+      phoneNumberId: whatsapp.phoneNumberId,
+      hasVerifyToken: Boolean(whatsapp.hasVerifyToken),
+      hasAppSecret: Boolean(whatsapp.hasAppSecret)
+    }));
+    res.json({
+      ok: true,
+      whatsapp: {
+        configured: Boolean(whatsapp.configured),
+        source: whatsapp.source || "none",
+        phoneNumberId: whatsapp.phoneNumberId || "",
+        hasVerifyToken: Boolean(whatsapp.hasVerifyToken),
+        hasAppSecret: Boolean(whatsapp.hasAppSecret),
+        info
+      }
+    });
+  }));
+
+  app.delete("/api/admin/whatsapp", requireAdmin, asyncRoute(async (req, res) => {
+    whatsapp.clearCredentials();
+    audit(db, req.user.id, "whatsapp.credentials_cleared", "channel", "whatsapp");
+    res.json({
+      ok: true,
+      whatsapp: {
+        configured: false,
+        source: "none",
+        phoneNumberId: "",
+        hasVerifyToken: false,
+        hasAppSecret: false,
+        info: null
+      }
+    });
+  }));
+
   app.get("/api/conversations", requireAuth, (req, res) => {
     const result = listConversations(db, {
       scope: req.query.scope,

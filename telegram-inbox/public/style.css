@@ -839,6 +839,90 @@ textarea {
 
 .password-card { width: min(420px, 100%); }
 
+.channels-card { width: min(620px, 100%); }
+
+.channel-divider {
+  height: 1px;
+  margin: 22px 0;
+  background: var(--line);
+}
+
+.channel-status {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 13px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--soft);
+}
+
+.channel-status > div {
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+}
+
+.channel-status strong { font-size: 12px; }
+.channel-status span:not(.channel-dot) { color: var(--muted); font-size: 11px; line-height: 1.45; }
+
+.channel-dot {
+  flex: 0 0 auto;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: #b7c5d2;
+  box-shadow: 0 0 0 4px rgba(183, 197, 210, .18);
+}
+
+.channel-dot.on {
+  background: var(--green);
+  box-shadow: 0 0 0 4px rgba(18, 161, 80, .14);
+}
+
+.channel-dot.off {
+  background: #b7c5d2;
+  box-shadow: 0 0 0 4px rgba(183, 197, 210, .18);
+}
+
+.channel-form {
+  display: grid;
+  gap: 12px;
+  margin-top: 16px;
+}
+
+.channel-note {
+  margin: 0;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.6;
+}
+
+.channel-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.channel-actions .primary { min-width: 128px; }
+.channel-actions .ghost { min-height: 38px; }
+
+.channel-help {
+  margin-top: 16px;
+  padding: 12px 13px;
+  border: 1px dashed #cbdce9;
+  border-radius: 11px;
+  background: #f8fbfd;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.6;
+}
+
+.channel-help strong { display: block; margin-bottom: 3px; color: #52697e; font-size: 11px; }
+.channel-help p { margin: 0; }
+.channel-help p + p { margin-top: 5px; }
+.channel-help code { white-space: normal; word-break: break-all; }
+
 .modal-head {
   display: flex;
   align-items: flex-start;

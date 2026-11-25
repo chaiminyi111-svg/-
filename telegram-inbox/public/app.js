@@ -18,6 +18,7 @@ const state = {
   customerDirty: false,
   stats: null,
   statsDays: 7,
+  channels: { telegram: null, whatsapp: null },
   telegramConfigured: false,
   whatsappConfigured: false,
   eventSource: null,
@@ -137,6 +138,7 @@ function showInbox() {
   $("#loginView").hidden = true;
   $("#inboxView").hidden = false;
   $("#currentUser").textContent = `${state.me.displayName} · ${state.me.role === "admin" ? "管理员" : "客服"}`;
+  $("#channelsBtn").hidden = state.me.role !== "admin";
   $("#teamBtn").hidden = state.me.role !== "admin";
   renderTelegramState();
 }
@@ -155,12 +157,14 @@ function showLogin() {
   document.body.classList.remove("mobile-chat-open");
   $("#inboxView").hidden = true;
   $("#loginView").hidden = false;
+  $("#channelsModal").hidden = true;
   $("#teamModal").hidden = true;
   $("#passwordModal").hidden = true;
   $("#cannedModal").hidden = true;
   $("#statsModal").hidden = true;
   $("#customerPanel").hidden = true;
   state.stats = null;
+  state.channels = { telegram: null, whatsapp: null };
   state.cannedReplies = [];
   state.editingCannedId = null;
   state.customerTags = [];
@@ -696,8 +700,8 @@ function renderTelegramState() {
   $("#telegramWarning").hidden = configured;
   $("#setupHint").hidden = configured;
   $("#telegramWarning").textContent = channel === "whatsapp"
-    ? "未配置 WHATSAPP_TOKEN / WHATSAPP_PHONE_NUMBER_ID，当前只能查看本地数据，无法发送回复。"
-    : "未配置 TELEGRAM_BOT_TOKEN，当前只能查看本地数据，无法发送回复。";
+    ? "未配置 WhatsApp 凭据，当前只能查看本地数据，无法发送回复。请让管理员在「渠道」中配置。"
+    : "未配置 Telegram Bot Token，当前只能查看本地数据，无法发送回复。请让管理员在「渠道」中配置。";
 
   const input = $("#messageInput");
   const send = $("#sendBtn");
@@ -1360,6 +1364,240 @@ async function deleteCannedReply(reply) {
   }
 }
 
+/* ---------- Channels ---------- */
+function setChannelError(elementId, message) {
+  const box = $("#" + elementId);
+  box.textContent = message || "";
+  box.hidden = !message;
+}
+
+function renderTelegramSettings() {
+  const settings = state.channels.telegram || {};
+  const configured = Boolean(settings.configured);
+  const bot = settings.bot;
+
+  $("#channelDot").className = "channel-dot " + (configured ? "on" : "off");
+  let text;
+  if (!configured) {
+    text = "未配置，填入 Token 后即可接收消息";
+  } else if (bot) {
+    text = "已连接";
+    if (bot.username) text += ` @${bot.username}`;
+    else if (bot.firstName) text += ` ${bot.firstName}`;
+    if (bot.id) text += ` · ID ${bot.id}`;
+    if (settings.source === "environment") text += " · 来自环境变量";
+  } else {
+    text = "已配置，但暂时无法连接 Telegram";
+    if (settings.warning) text += `：${settings.warning}`;
+  }
+  $("#channelStatusText").textContent = text;
+  $("#telegramClearBtn").hidden = !configured;
+  $("#telegramTokenInput").placeholder = configured
+    ? "已配置，留空保持不变"
+    : "从 @BotFather 获取，例如 123456:ABC...";
+}
+
+function renderWhatsAppSettings() {
+  const settings = state.channels.whatsapp || {};
+  const configured = Boolean(settings.configured);
+  const info = settings.info;
+
+  $("#whatsappDot").className = "channel-dot " + (configured ? "on" : "off");
+  let text;
+  if (!configured) {
+    text = "未配置，填写 Meta 凭据后启用";
+  } else if (info) {
+    text = "已连接";
+    if (info.verifiedName) text += ` ${info.verifiedName}`;
+    if (info.displayPhoneNumber) text += ` · ${info.displayPhoneNumber}`;
+    if (settings.source === "environment") text += " · 来自环境变量";
+    const missing = [];
+    if (!settings.hasVerifyToken) missing.push("Verify Token");
+    if (!settings.hasAppSecret) missing.push("App Secret");
+    if (missing.length) text += ` · 缺少 ${missing.join("、")}`;
+  } else {
+    text = "已配置，但暂时无法连接 WhatsApp";
+    if (settings.warning) text += `：${settings.warning}`;
+  }
+  $("#whatsappStatusText").textContent = text;
+  $("#whatsappClearBtn").hidden = !configured;
+  if (settings.phoneNumberId) $("#whatsappPhoneInput").value = settings.phoneNumberId;
+  $("#whatsappTokenInput").placeholder = configured
+    ? "已配置，留空保持不变"
+    : "Meta 永久访问 Token";
+  $("#whatsappVerifyInput").placeholder = settings.hasVerifyToken
+    ? "已配置，留空保持不变"
+    : "自定义校验串，与 Meta 后台填写一致";
+  $("#whatsappSecretInput").placeholder = settings.hasAppSecret
+    ? "已配置，留空保持不变"
+    : "用于校验 X-Hub-Signature-256";
+  $("#whatsappWebhookUrl").textContent = location.origin + "/webhook/whatsapp";
+}
+
+function renderChannelSettings() {
+  renderTelegramSettings();
+  renderWhatsAppSettings();
+}
+
+async function loadChannelSettings() {
+  const [telegramResult, whatsappResult] = await Promise.allSettled([
+    api("/api/admin/telegram"),
+    api("/api/admin/whatsapp")
+  ]);
+
+  if (telegramResult.status === "fulfilled") {
+    state.channels.telegram = telegramResult.value.telegram;
+    state.telegramConfigured = Boolean(telegramResult.value.telegram.configured);
+  } else {
+    setChannelError("channelError", telegramResult.reason.message);
+    $("#channelDot").className = "channel-dot off";
+    $("#channelStatusText").textContent = "读取配置失败";
+  }
+
+  if (whatsappResult.status === "fulfilled") {
+    state.channels.whatsapp = whatsappResult.value.whatsapp;
+    state.whatsappConfigured = Boolean(whatsappResult.value.whatsapp.configured);
+  } else {
+    setChannelError("whatsappError", whatsappResult.reason.message);
+    $("#whatsappDot").className = "channel-dot off";
+    $("#whatsappStatusText").textContent = "读取配置失败";
+  }
+
+  renderChannelSettings();
+  renderTelegramState();
+}
+
+async function openChannelsModal() {
+  if (state.me?.role !== "admin") return;
+  $("#channelsModal").hidden = false;
+  $("#telegramTokenInput").value = "";
+  $("#whatsappTokenInput").value = "";
+  $("#whatsappPhoneInput").value = "";
+  $("#whatsappVerifyInput").value = "";
+  $("#whatsappSecretInput").value = "";
+  $("#telegramClearBtn").hidden = true;
+  $("#whatsappClearBtn").hidden = true;
+  $("#channelDot").className = "channel-dot";
+  $("#whatsappDot").className = "channel-dot";
+  $("#channelStatusText").textContent = "正在检查配置…";
+  $("#whatsappStatusText").textContent = "正在检查配置…";
+  setChannelError("channelError", "");
+  setChannelError("whatsappError", "");
+  await loadChannelSettings();
+}
+
+async function saveTelegramToken(event) {
+  event.preventDefault();
+  const token = $("#telegramTokenInput").value.trim();
+  if (!token) {
+    setChannelError("channelError", "请输入 Telegram Bot Token");
+    return;
+  }
+
+  const button = $("#telegramSaveBtn");
+  button.disabled = true;
+  button.textContent = "验证中…";
+  setChannelError("channelError", "");
+
+  try {
+    const data = await api("/api/admin/telegram", {
+      method: "POST",
+      body: { token }
+    });
+    state.channels.telegram = data.telegram;
+    state.telegramConfigured = Boolean(data.telegram.configured);
+    $("#telegramTokenInput").value = "";
+    renderChannelSettings();
+    renderTelegramState();
+    showToast("Telegram 已连接，开始接收消息", "success");
+  } catch (error) {
+    setChannelError("channelError", error.message);
+  } finally {
+    button.disabled = false;
+    button.textContent = "保存并连接";
+  }
+}
+
+async function clearTelegramToken() {
+  if (!window.confirm("确定清除 Telegram Token？清除后将停止接收 Telegram 消息。")) return;
+
+  const button = $("#telegramClearBtn");
+  button.disabled = true;
+  setChannelError("channelError", "");
+  try {
+    const data = await api("/api/admin/telegram", { method: "DELETE" });
+    state.channels.telegram = data.telegram;
+    state.telegramConfigured = false;
+    renderChannelSettings();
+    renderTelegramState();
+    showToast("Telegram Token 已清除", "success");
+  } catch (error) {
+    setChannelError("channelError", error.message);
+  } finally {
+    button.disabled = false;
+  }
+}
+
+async function saveWhatsAppCredentials(event) {
+  event.preventDefault();
+  const payload = {
+    token: $("#whatsappTokenInput").value.trim(),
+    phoneNumberId: $("#whatsappPhoneInput").value.trim(),
+    verifyToken: $("#whatsappVerifyInput").value.trim(),
+    appSecret: $("#whatsappSecretInput").value.trim()
+  };
+  if (!payload.phoneNumberId) {
+    setChannelError("whatsappError", "请填写 WhatsApp Phone Number ID");
+    return;
+  }
+
+  const button = $("#whatsappSaveBtn");
+  button.disabled = true;
+  button.textContent = "验证中…";
+  setChannelError("whatsappError", "");
+
+  try {
+    const data = await api("/api/admin/whatsapp", {
+      method: "POST",
+      body: payload
+    });
+    state.channels.whatsapp = data.whatsapp;
+    state.whatsappConfigured = Boolean(data.whatsapp.configured);
+    $("#whatsappTokenInput").value = "";
+    $("#whatsappVerifyInput").value = "";
+    $("#whatsappSecretInput").value = "";
+    renderChannelSettings();
+    renderTelegramState();
+    showToast("WhatsApp 配置已保存", "success");
+  } catch (error) {
+    setChannelError("whatsappError", error.message);
+  } finally {
+    button.disabled = false;
+    button.textContent = "保存 WhatsApp 配置";
+  }
+}
+
+async function clearWhatsAppCredentials() {
+  if (!window.confirm("确定清除 WhatsApp 配置？清除后将停止收发 WhatsApp 消息。")) return;
+
+  const button = $("#whatsappClearBtn");
+  button.disabled = true;
+  setChannelError("whatsappError", "");
+  try {
+    const data = await api("/api/admin/whatsapp", { method: "DELETE" });
+    state.channels.whatsapp = data.whatsapp;
+    state.whatsappConfigured = false;
+    $("#whatsappPhoneInput").value = "";
+    renderChannelSettings();
+    renderTelegramState();
+    showToast("WhatsApp 配置已清除", "success");
+  } catch (error) {
+    setChannelError("whatsappError", error.message);
+  } finally {
+    button.disabled = false;
+  }
+}
+
 /* ---------- Team ---------- */
 async function openTeamModal() {
   if (state.me.role !== "admin") return;
@@ -1434,8 +1672,12 @@ async function updateTeamUser(id, payload) {
     if (data.user.id === state.me.id) {
       state.me = data.user;
       $("#currentUser").textContent = `${state.me.displayName} · ${state.me.role === "admin" ? "管理员" : "客服"}`;
+      $("#channelsBtn").hidden = state.me.role !== "admin";
       $("#teamBtn").hidden = state.me.role !== "admin";
-      if (state.me.role !== "admin") $("#teamModal").hidden = true;
+      if (state.me.role !== "admin") {
+        $("#channelsModal").hidden = true;
+        $("#teamModal").hidden = true;
+      }
     }
     showToast("成员已更新", "success");
     await Promise.all([loadUsers(), loadTeamUsers()]);
@@ -1666,6 +1908,16 @@ function bindEvents() {
   });
   $("#statsRange").addEventListener("change", loadStats);
 
+  $("#channelsBtn").addEventListener("click", openChannelsModal);
+  $("#channelsClose").addEventListener("click", () => { $("#channelsModal").hidden = true; });
+  $("#channelsModal").addEventListener("click", event => {
+    if (event.target === $("#channelsModal")) $("#channelsModal").hidden = true;
+  });
+  $("#telegramForm").addEventListener("submit", saveTelegramToken);
+  $("#telegramClearBtn").addEventListener("click", clearTelegramToken);
+  $("#whatsappForm").addEventListener("submit", saveWhatsAppCredentials);
+  $("#whatsappClearBtn").addEventListener("click", clearWhatsAppCredentials);
+
   $("#teamBtn").addEventListener("click", openTeamModal);
   $("#teamClose").addEventListener("click", () => { $("#teamModal").hidden = true; });
   $("#teamModal").addEventListener("click", event => {
@@ -1739,6 +1991,7 @@ function bindEvents() {
 
   document.addEventListener("keydown", event => {
     if (event.key === "Escape") {
+      $("#channelsModal").hidden = true;
       $("#teamModal").hidden = true;
       $("#passwordModal").hidden = true;
       $("#cannedModal").hidden = true;

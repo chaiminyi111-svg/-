@@ -20,6 +20,33 @@ function startMockTelegram() {
     let body = "";
     for await (const chunk of req) body += chunk;
     const url = new URL(req.url, "http://127.0.0.1");
+    const botMatch = url.pathname.match(/^\/bot([^/]+)\/getMe$/);
+
+    if (botMatch) {
+      if (botMatch[1] === "BAD") {
+        res.statusCode = 401;
+        res.setHeader("content-type", "application/json");
+        res.end(JSON.stringify({ ok: false, description: "Unauthorized" }));
+        return;
+      }
+      res.setHeader("content-type", "application/json");
+      res.end(JSON.stringify({
+        ok: true,
+        result: {
+          id: 123456,
+          is_bot: true,
+          first_name: "Test Bot",
+          username: "test_bot"
+        }
+      }));
+      return;
+    }
+
+    if (/^\/bot[^/]+\/getUpdates$/.test(url.pathname)) {
+      res.setHeader("content-type", "application/json");
+      res.end(JSON.stringify({ ok: true, result: [] }));
+      return;
+    }
 
     if (url.pathname === "/botTEST/sendMessage") {
       const payload = JSON.parse(body || "{}");
@@ -106,6 +133,21 @@ function startMockWhatsApp() {
       sent.push(payload);
       res.setHeader("content-type", "application/json");
       res.end(JSON.stringify({ messages: [{ id: "wamid.OUT_" + sent.length }] }));
+      return;
+    }
+    if (req.method === "GET" && /^\/[^/]+$/.test(url.pathname)) {
+      const phoneId = url.pathname.slice(1);
+      res.setHeader("content-type", "application/json");
+      if (phoneId === "BADPHONE") {
+        res.statusCode = 400;
+        res.end(JSON.stringify({ error: { message: "Unsupported get request" } }));
+        return;
+      }
+      res.end(JSON.stringify({
+        id: phoneId,
+        display_phone_number: "+86 138 0000 0000",
+        verified_name: "测试 WhatsApp"
+      }));
       return;
     }
     res.statusCode = 404;
@@ -201,6 +243,7 @@ test("Telegram support inbox end-to-end API", async t => {
 
   t.after(async () => {
     await new Promise(resolve => server.close(resolve));
+    await telegram.stop();
     broadcaster.close();
     db.close();
     await new Promise(resolve => mock.server.close(resolve));
@@ -611,6 +654,63 @@ test("Telegram support inbox end-to-end API", async t => {
     });
     assert.equal(demote.response.status, 400);
   });
+
+  await t.test("admin can configure and clear Telegram token without exposing it", async () => {
+    const forbidden = await apiRequest(base, "/api/admin/telegram", {
+      cookie: agent1Cookie
+    });
+    assert.equal(forbidden.response.status, 403);
+
+    const before = await apiRequest(base, "/api/admin/telegram", { cookie: adminCookie });
+    assert.equal(before.response.status, 200);
+    assert.equal(before.data.telegram.configured, true);
+    assert.equal(before.data.telegram.source, "environment");
+    assert.equal(before.data.telegram.bot.username, "test_bot");
+
+    const invalid = await apiRequest(base, "/api/admin/telegram", {
+      method: "POST",
+      cookie: adminCookie,
+      body: { token: "BAD" }
+    });
+    assert.equal(invalid.response.status, 400);
+    assert.equal(telegram.configured, true);
+
+    const saved = await apiRequest(base, "/api/admin/telegram", {
+      method: "POST",
+      cookie: adminCookie,
+      body: { token: "NEWTOKEN" }
+    });
+    assert.equal(saved.response.status, 200, JSON.stringify(saved.data));
+    assert.equal(saved.data.telegram.configured, true);
+    assert.equal(saved.data.telegram.source, "database");
+    assert.equal(saved.data.telegram.bot.username, "test_bot");
+    assert.equal(JSON.stringify(saved.data).includes("NEWTOKEN"), false);
+    assert.equal(db.prepare("SELECT value FROM settings WHERE key = 'telegram_bot_token'").get().value, "NEWTOKEN");
+
+    const afterSave = await apiRequest(base, "/api/health");
+    assert.equal(afterSave.data.telegramConfigured, true);
+
+    const cleared = await apiRequest(base, "/api/admin/telegram", {
+      method: "DELETE",
+      cookie: adminCookie
+    });
+    assert.equal(cleared.response.status, 200);
+    assert.equal(cleared.data.telegram.configured, false);
+    assert.equal(telegram.configured, false);
+    assert.equal(telegram.running, false);
+
+    const afterClear = await apiRequest(base, "/api/health");
+    assert.equal(afterClear.data.telegramConfigured, false);
+
+    const restored = await apiRequest(base, "/api/admin/telegram", {
+      method: "POST",
+      cookie: adminCookie,
+      body: { token: "TEST" }
+    });
+    assert.equal(restored.response.status, 200);
+    assert.equal(restored.data.telegram.configured, true);
+    assert.equal(telegram.configured, true);
+  });
 });
 
 test("WhatsApp Cloud API adapter", async t => {
@@ -741,4 +841,111 @@ test("WhatsApp Cloud API adapter", async t => {
     body: Buffer.from("hello")
   });
   assert.equal(media.status, 400);
+
+  await t.test("admin can configure and clear WhatsApp credentials without exposing secrets", async () => {
+    const anonymous = await apiRequest(base, "/api/admin/whatsapp");
+    assert.equal(anonymous.response.status, 401);
+
+    const created = await apiRequest(base, "/api/users", {
+      method: "POST",
+      cookie: adminCookie,
+      body: { username: "wa-agent", displayName: "WhatsApp 客服", password: "wa-agent-pass", role: "agent" }
+    });
+    assert.equal(created.response.status, 201);
+    const agentCookie = await login(base, "wa-agent", "wa-agent-pass");
+    const forbidden = await apiRequest(base, "/api/admin/whatsapp", { cookie: agentCookie });
+    assert.equal(forbidden.response.status, 403);
+
+    const before = await apiRequest(base, "/api/admin/whatsapp", { cookie: adminCookie });
+    assert.equal(before.response.status, 200);
+    assert.equal(before.data.whatsapp.configured, true);
+    assert.equal(before.data.whatsapp.source, "environment");
+    assert.equal(before.data.whatsapp.phoneNumberId, "PHONE");
+    assert.equal(before.data.whatsapp.hasVerifyToken, true);
+    assert.equal(before.data.whatsapp.hasAppSecret, true);
+    assert.equal(before.data.whatsapp.info.verifiedName, "测试 WhatsApp");
+
+    const invalid = await apiRequest(base, "/api/admin/whatsapp", {
+      method: "POST",
+      cookie: adminCookie,
+      body: { token: "WA_NEW", phoneNumberId: "BADPHONE" }
+    });
+    assert.equal(invalid.response.status, 400);
+    assert.equal(whatsapp.configured, true);
+
+    const saved = await apiRequest(base, "/api/admin/whatsapp", {
+      method: "POST",
+      cookie: adminCookie,
+      body: {
+        token: "WA_NEW",
+        phoneNumberId: "PHONE",
+        verifyToken: "new-verify",
+        appSecret: "new-secret"
+      }
+    });
+    assert.equal(saved.response.status, 200, JSON.stringify(saved.data));
+    assert.equal(saved.data.whatsapp.configured, true);
+    assert.equal(saved.data.whatsapp.source, "database");
+    assert.equal(saved.data.whatsapp.hasVerifyToken, true);
+    assert.equal(saved.data.whatsapp.hasAppSecret, true);
+    assert.equal(saved.data.whatsapp.info.displayPhoneNumber, "+86 138 0000 0000");
+    assert.equal(JSON.stringify(saved.data).includes("WA_NEW"), false);
+    assert.equal(JSON.stringify(saved.data).includes("new-secret"), false);
+    assert.equal(db.prepare("SELECT value FROM settings WHERE key = 'whatsapp_token'").get().value, "WA_NEW");
+    assert.equal(db.prepare("SELECT value FROM settings WHERE key = 'whatsapp_app_secret'").get().value, "new-secret");
+
+    const preserved = await apiRequest(base, "/api/admin/whatsapp", {
+      method: "POST",
+      cookie: adminCookie,
+      body: { phoneNumberId: "PHONE" }
+    });
+    assert.equal(preserved.response.status, 200);
+    assert.equal(preserved.data.whatsapp.hasVerifyToken, true);
+    assert.equal(preserved.data.whatsapp.hasAppSecret, true);
+    assert.equal(db.prepare("SELECT value FROM settings WHERE key = 'whatsapp_token'").get().value, "WA_NEW");
+
+    const verifyNew = await apiRequest(
+      base,
+      "/webhook/whatsapp?hub.mode=subscribe&hub.verify_token=new-verify&hub.challenge=new-challenge"
+    );
+    assert.equal(verifyNew.response.status, 200);
+    assert.equal(verifyNew.data.raw, "new-challenge");
+
+    const verifyOld = await apiRequest(
+      base,
+      "/webhook/whatsapp?hub.mode=subscribe&hub.verify_token=verify-me&hub.challenge=x"
+    );
+    assert.equal(verifyOld.response.status, 403);
+
+    const cleared = await apiRequest(base, "/api/admin/whatsapp", {
+      method: "DELETE",
+      cookie: adminCookie
+    });
+    assert.equal(cleared.response.status, 200);
+    assert.equal(cleared.data.whatsapp.configured, false);
+    assert.equal(whatsapp.configured, false);
+
+    const afterClear = await apiRequest(base, "/api/health");
+    assert.equal(afterClear.data.whatsappConfigured, false);
+
+    const webhookAfterClear = await apiRequest(
+      base,
+      "/webhook/whatsapp?hub.mode=subscribe&hub.verify_token=new-verify&hub.challenge=x"
+    );
+    assert.equal(webhookAfterClear.response.status, 503);
+
+    const restored = await apiRequest(base, "/api/admin/whatsapp", {
+      method: "POST",
+      cookie: adminCookie,
+      body: {
+        token: "WA_TEST",
+        phoneNumberId: "PHONE",
+        verifyToken: "verify-me",
+        appSecret: "app-secret"
+      }
+    });
+    assert.equal(restored.response.status, 200);
+    assert.equal(restored.data.whatsapp.configured, true);
+    assert.equal(whatsapp.configured, true);
+  });
 });

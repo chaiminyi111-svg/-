@@ -1,5 +1,5 @@
 const crypto = require("node:crypto");
-const { withTransaction } = require("./db");
+const { withTransaction, getSetting, setSetting } = require("./db");
 const { getConversationById } = require("./store");
 const { messagePreview, nowIso, toConversationSummary, toPublicMessage } = require("./util");
 
@@ -20,6 +20,42 @@ class WhatsAppClient {
 
   get configured() {
     return Boolean(this.token && this.phoneNumberId);
+  }
+
+  async getPhoneInfo() {
+    if (!this.configured) {
+      throw new WhatsAppError("未配置 WhatsApp Cloud API 凭据", "NOT_CONFIGURED");
+    }
+
+    let response;
+    try {
+      response = await fetch(
+        `${this.apiBase}/${encodeURIComponent(this.phoneNumberId)}?fields=id,display_phone_number,verified_name`,
+        {
+          headers: { authorization: `Bearer ${this.token}` },
+          signal: AbortSignal.timeout(15000)
+        }
+      );
+    } catch (error) {
+      if (error.name === "AbortError") throw error;
+      throw new WhatsAppError("无法连接 WhatsApp Cloud API，请检查服务器网络", "NETWORK_ERROR");
+    }
+
+    let data;
+    try {
+      data = await response.json();
+    } catch {
+      throw new WhatsAppError(`WhatsApp API 返回异常（HTTP ${response.status}）`, "BAD_RESPONSE");
+    }
+    if (!response.ok) {
+      const detail = data?.error?.message || `HTTP ${response.status}`;
+      throw new WhatsAppError(`WhatsApp API 错误：${String(detail).slice(0, 300)}`, "API_ERROR");
+    }
+    return {
+      id: String(data.id || this.phoneNumberId),
+      displayPhoneNumber: data.display_phone_number ? String(data.display_phone_number) : "",
+      verifiedName: data.verified_name ? String(data.verified_name) : ""
+    };
   }
 
   async sendText(to, text) {
@@ -136,11 +172,92 @@ function extractWhatsAppContent(message) {
 }
 
 function createWhatsAppService({ db, config, logger, broadcaster }) {
+  const readStored = key => getSetting(db, "whatsapp_" + key, null);
+  const storedKeys = ["token", "phone_number_id", "verify_token", "app_secret"];
+  const hasStored = storedKeys.some(key => readStored(key) !== null);
+  const credentials = {
+    token: readStored("token") !== null ? readStored("token") : config.whatsappToken,
+    phoneNumberId: readStored("phone_number_id") !== null
+      ? readStored("phone_number_id")
+      : config.whatsappPhoneNumberId,
+    verifyToken: readStored("verify_token") !== null ? readStored("verify_token") : config.whatsappVerifyToken,
+    appSecret: readStored("app_secret") !== null ? readStored("app_secret") : config.whatsappAppSecret
+  };
+  let source = hasStored
+    ? "database"
+    : (config.whatsappToken || config.whatsappPhoneNumberId || config.whatsappVerifyToken || config.whatsappAppSecret
+      ? "environment"
+      : "none");
   const client = new WhatsAppClient({
-    token: config.whatsappToken,
-    phoneNumberId: config.whatsappPhoneNumberId,
+    token: credentials.token,
+    phoneNumberId: credentials.phoneNumberId,
     apiBase: config.whatsappApiBase
   });
+
+  function applyCredentials(next) {
+    credentials.token = next.token;
+    credentials.phoneNumberId = next.phoneNumberId;
+    credentials.verifyToken = next.verifyToken;
+    credentials.appSecret = next.appSecret;
+    client.token = next.token;
+    client.phoneNumberId = next.phoneNumberId;
+  }
+
+  function saveCredentials() {
+    setSetting(db, "whatsapp_token", credentials.token);
+    setSetting(db, "whatsapp_phone_number_id", credentials.phoneNumberId);
+    setSetting(db, "whatsapp_verify_token", credentials.verifyToken);
+    setSetting(db, "whatsapp_app_secret", credentials.appSecret);
+    source = "database";
+  }
+
+  function normalizePhoneInfo(info) {
+    if (!info) return null;
+    return {
+      id: info.id ? String(info.id) : "",
+      displayPhoneNumber: info.displayPhoneNumber ? String(info.displayPhoneNumber) : "",
+      verifiedName: info.verifiedName ? String(info.verifiedName) : ""
+    };
+  }
+
+  async function getInfo() {
+    if (!client.configured) return null;
+    return normalizePhoneInfo(await client.getPhoneInfo());
+  }
+
+  async function updateCredentials(input = {}) {
+    const token = input.token ? String(input.token).trim() : credentials.token;
+    const phoneNumberId = input.phoneNumberId !== undefined
+      ? String(input.phoneNumberId).trim()
+      : credentials.phoneNumberId;
+    const verifyToken = input.verifyToken ? String(input.verifyToken).trim() : credentials.verifyToken;
+    const appSecret = input.appSecret ? String(input.appSecret).trim() : credentials.appSecret;
+
+    if (!token || !phoneNumberId) {
+      throw new WhatsAppError("请填写 WhatsApp 访问 Token 和 Phone Number ID", "NOT_CONFIGURED");
+    }
+    if (token.length > 1000) throw new WhatsAppError("WhatsApp 访问 Token 过长", "INVALID_CREDENTIALS");
+    if (phoneNumberId.length > 100) throw new WhatsAppError("Phone Number ID 过长", "INVALID_CREDENTIALS");
+    if (verifyToken.length > 200) throw new WhatsAppError("Verify Token 过长", "INVALID_CREDENTIALS");
+    if (appSecret.length > 200) throw new WhatsAppError("App Secret 过长", "INVALID_CREDENTIALS");
+
+    const probe = new WhatsAppClient({
+      token,
+      phoneNumberId,
+      apiBase: config.whatsappApiBase
+    });
+    const info = normalizePhoneInfo(await probe.getPhoneInfo());
+
+    applyCredentials({ token, phoneNumberId, verifyToken, appSecret });
+    saveCredentials();
+    return info;
+  }
+
+  function clearCredentials() {
+    applyCredentials({ token: "", phoneNumberId: "", verifyToken: "", appSecret: "" });
+    saveCredentials();
+    source = "none";
+  }
 
   function emit(event) {
     if (typeof broadcaster === "function") broadcaster(event);
@@ -239,9 +356,9 @@ function createWhatsAppService({ db, config, logger, broadcaster }) {
         const value = change?.value;
         if (!value) continue;
         if (
-          config.whatsappPhoneNumberId &&
+          credentials.phoneNumberId &&
           value.metadata?.phone_number_id &&
-          String(value.metadata.phone_number_id) !== config.whatsappPhoneNumberId
+          String(value.metadata.phone_number_id) !== credentials.phoneNumberId
         ) {
           continue;
         }
@@ -308,16 +425,16 @@ function createWhatsAppService({ db, config, logger, broadcaster }) {
   }
 
   function verifyWebhook(mode, token, challenge) {
-    if (mode !== "subscribe" || !config.whatsappVerifyToken) return null;
-    if (String(token || "") !== config.whatsappVerifyToken) return null;
+    if (mode !== "subscribe" || !credentials.verifyToken) return null;
+    if (String(token || "") !== credentials.verifyToken) return null;
     return String(challenge || "");
   }
 
   function verifySignature(rawBody, signature) {
-    if (!config.whatsappAppSecret) return false;
+    if (!credentials.appSecret) return false;
     if (!rawBody || !signature) return false;
     const expected = "sha256=" + crypto
-      .createHmac("sha256", config.whatsappAppSecret)
+      .createHmac("sha256", credentials.appSecret)
       .update(rawBody)
       .digest("hex");
     const left = Buffer.from(expected);
@@ -327,7 +444,14 @@ function createWhatsAppService({ db, config, logger, broadcaster }) {
 
   return {
     client,
-    configured: client.configured,
+    get configured() { return client.configured; },
+    get source() { return source; },
+    get phoneNumberId() { return credentials.phoneNumberId; },
+    get hasVerifyToken() { return Boolean(credentials.verifyToken); },
+    get hasAppSecret() { return Boolean(credentials.appSecret); },
+    getInfo,
+    updateCredentials,
+    clearCredentials,
     ingestWebhook,
     ingestMessage,
     sendReply,

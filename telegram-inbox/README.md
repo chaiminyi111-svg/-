@@ -18,6 +18,7 @@
 - 入站媒体（Telegram）：图片、文件、语音、音频、视频、贴纸展示与下载代理
 - 统计看板：最近 7/14/30 天会话、消息趋势、客服工作量
 - 团队管理：管理员创建客服、调整角色、停用/启用、重置密码
+- 渠道设置：管理员可在网页顶栏「渠道」中配置 Telegram 和 WhatsApp 凭据，保存前自动验证，立即生效，无需改 `.env` 或重启
 - 实时更新：SSE 推送新消息和会话变更，断线自动降级轮询
 - 本地账号体系：scrypt 密码哈希、HttpOnly 会话 Cookie、登录限流
 - 安全基线：CSRF 同源校验、CSP、参数化 SQL、审计日志
@@ -102,21 +103,23 @@ docker compose exec telegram-inbox node scripts/reset-password.js admin '新的�
 
 1. 在 Meta for Developers 创建 Business 应用，添加 WhatsApp 产品。
 2. 在 WhatsApp → API Setup 里拿到 **Phone number ID** 和访问 Token。
-3. 在 `.env` 中配置：
-
-   ```dotenv
-   WHATSAPP_TOKEN=你的访问Token
-   WHATSAPP_PHONE_NUMBER_ID=你的PhoneNumberID
-   WHATSAPP_VERIFY_TOKEN=自己生成的一段随机字符串
-   WHATSAPP_APP_SECRET=Meta应用密钥
-   ```
-
+3. 用管理员账号登录工作台，点击顶栏「渠道」，在 WhatsApp 区域填写访问 Token、Phone Number ID、Verify Token 和 App Secret。保存前会调用 Graph API 校验 Token 和 Phone Number ID，成功后立即生效，无需重启。
 4. 把服务暴露到公网 HTTPS，然后在 Meta 后台配置 Webhook：
-   - Callback URL：`https://你的域名/webhook/whatsapp`
-   - Verify token：与 `WHATSAPP_VERIFY_TOKEN` 一致
+   - Callback URL：`https://你的域名/webhook/whatsapp`（页面里会显示完整地址）
+   - Verify token：与页面里填写的 Verify Token 一致
    - 订阅字段：`messages`
-5. 重启服务，`/api/health` 里 `whatsappConfigured` 为 `true` 即表示凭据已加载。
-6. 用测试号码给业务号码发一条 WhatsApp 文本，会话会出现在收件箱。
+5. 用测试号码给业务号码发一条 WhatsApp 文本，会话会出现在收件箱。
+
+也可以继续在 `.env` 中配置：
+
+```dotenv
+WHATSAPP_TOKEN=你的访问Token
+WHATSAPP_PHONE_NUMBER_ID=你的PhoneNumberID
+WHATSAPP_VERIFY_TOKEN=自己生成的一段随机字符串
+WHATSAPP_APP_SECRET=Meta应用密钥
+```
+
+网页中保存的凭据存在 SQLite 数据库里，并会覆盖环境变量；页面不会回显 Token、Verify Token 或 App Secret，数据库文件权限为 `600`。需要停用时点击「清除 WhatsApp 配置」。
 
 注意：
 
@@ -130,16 +133,17 @@ docker compose exec telegram-inbox node scripts/reset-password.js admin '新的�
 
 1. 在 Telegram 搜索 `@BotFather`。
 2. 发送 `/newbot`，按提示创建机器人。
-3. 复制 BotFather 返回的 Token，填入 `.env` 的 `TELEGRAM_BOT_TOKEN`。不要把 Token 发到聊天、Issue 或提交到 Git。
-4. 先验证 Token：
+3. 复制 BotFather 返回的 Token。不要把 Token 发到聊天、Issue 或提交到 Git。
+4. 用管理员账号登录工作台，点击顶栏「渠道」，粘贴 Token 后点击「保存并连接」。服务会先调用 Telegram `getMe` 验证，成功后立即开始接收消息，无需重启。
+5. 用客户账号给机器人发送 `/start`，然后发一条消息；工作台就会出现会话。
 
-   ```bash
-   npm run check:telegram
-   ```
+也可以继续用 `.env` 的 `TELEGRAM_BOT_TOKEN` 配置。网页中保存的 Token 存在 SQLite 数据库里，并会覆盖环境变量；页面不会回显 Token，数据库文件权限为 `600`。需要停用时点击「清除 Token」。
 
-   看到 `Token 有效：@你的机器人` 即可。
-5. 重启服务。
-6. 用客户账号给机器人发送 `/start`，然后发一条消息；工作台就会出现会话。
+命令行验证（可选）：
+
+```bash
+npm run check:telegram
+```
 
 生产环境建议把 Token 放在服务器环境变量或密钥管理服务里，而不是写进代码；`.env` 仅用于本机/单机部署。
 
@@ -210,14 +214,14 @@ TRUST_PROXY=true
 | `ADMIN_USERNAME` | `admin` | 首次启动创建的管理员用户名 |
 | `ADMIN_PASSWORD` | 空 | 首次启动管理员密码；为空则随机生成并打印 |
 | `ADMIN_DISPLAY_NAME` | `管理员` | 管理员显示名称 |
-| `TELEGRAM_BOT_TOKEN` | 空 | BotFather 提供的 Token；为空时只能查看已有数据 |
+| `TELEGRAM_BOT_TOKEN` | 空 | BotFather 提供的 Token；也可登录后在「渠道」页面保存，页面配置优先 |
 | `TELEGRAM_API_BASE` | `https://api.telegram.org` | Telegram API 地址，可指向自建 Bot API 或反向代理 |
 | `TELEGRAM_POLL_TIMEOUT` | `25` | 长轮询等待秒数 |
 | `TELEGRAM_DELETE_WEBHOOK` | `false` | 启动时是否删除已有 webhook |
-| `WHATSAPP_TOKEN` | 空 | WhatsApp Cloud API 访问 Token |
-| `WHATSAPP_PHONE_NUMBER_ID` | 空 | WhatsApp 业务号码 ID |
-| `WHATSAPP_VERIFY_TOKEN` | 空 | Meta Webhook 校验串 |
-| `WHATSAPP_APP_SECRET` | 空 | Meta 应用密钥，用于 Webhook 验签 |
+| `WHATSAPP_TOKEN` | 空 | WhatsApp Cloud API 访问 Token；也可在「渠道」页面保存 |
+| `WHATSAPP_PHONE_NUMBER_ID` | 空 | WhatsApp 业务号码 ID；也可在「渠道」页面保存 |
+| `WHATSAPP_VERIFY_TOKEN` | 空 | Meta Webhook 校验串；也可在「渠道」页面保存 |
+| `WHATSAPP_APP_SECRET` | 空 | Meta 应用密钥，用于 Webhook 验签；也可在「渠道」页面保存 |
 | `WHATSAPP_API_BASE` | `https://graph.facebook.com/v20.0` | Meta Graph API 地址 |
 | `SESSION_DAYS` | `7` | 登录会话有效天数 |
 | `TRUST_PROXY` | `true` | 是否信任反向代理的 `X-Forwarded-*` |
@@ -272,7 +276,7 @@ sqlite3 data/inbox.db ".backup 'data/inbox-backup.db'"
 npm test
 ```
 
-测试会启动 mock Telegram API 和 mock WhatsApp API，覆盖登录、收消息、分配权限、文本回复、出站图片/文件、媒体代理、WhatsApp webhook 验签与回复、快捷回复、客户标签/备注、统计、搜索、CSRF、角色校验和最后管理员保护，不需要真实平台凭据。
+测试会启动 mock Telegram API 和 mock WhatsApp API，覆盖登录、收消息、分配权限、文本回复、出站图片/文件、媒体代理、WhatsApp webhook 验签与回复、管理员渠道凭据保存/清除、快捷回复、客户标签/备注、统计、搜索、CSRF、角色校验和最后管理员保护，不需要真实平台凭据。
 
 ## 后续路线
 

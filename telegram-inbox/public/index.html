@@ -49,6 +49,7 @@
         <span id="connectionStatus" class="connection"><i></i><span>连接中</span></span>
         <span id="currentUser" class="current-user"></span>
         <button id="statsBtn" class="ghost" type="button">数据</button>
+        <button id="channelsBtn" class="ghost" type="button" hidden>渠道</button>
         <button id="teamBtn" class="ghost" type="button" hidden>团队</button>
         <button id="passwordBtn" class="ghost" type="button">修改密码</button>
         <button id="logoutBtn" class="ghost" type="button">退出</button>
@@ -97,7 +98,7 @@
           <p>左侧集中展示 Telegram 和 WhatsApp 会话。分配客服、标记状态，回复会通过对应渠道发出。</p>
           <div id="setupHint" class="setup-hint" hidden>
             <strong>还没有配置消息渠道</strong>
-            <p>在 <code>.env</code> 中设置 <code>TELEGRAM_BOT_TOKEN</code> 或 <code>WHATSAPP_TOKEN</code> / <code>WHATSAPP_PHONE_NUMBER_ID</code>，重启服务后即可收发消息。</p>
+            <p>点击顶栏「渠道」，填写 Telegram 或 WhatsApp 凭据，保存后即可收发消息；也可以在 <code>.env</code> 中配置。</p>
           </div>
         </div>
 
@@ -312,6 +313,120 @@
           </div>
           <div id="cannedError" class="form-error" hidden></div>
         </form>
+      </div>
+    </div>
+  </div>
+
+  <div id="channelsModal" class="modal" hidden>
+    <div class="modal-card channels-card" role="dialog" aria-modal="true" aria-labelledby="channelsTitle">
+      <header class="modal-head">
+        <div>
+          <h3 id="channelsTitle">管理员渠道设置</h3>
+          <p>配置 Telegram 和 WhatsApp 凭据。保存后立即生效，无需重启。</p>
+        </div>
+        <button id="channelsClose" class="modal-close" type="button" aria-label="关闭">×</button>
+      </header>
+
+      <div class="channel-status" id="channelStatus">
+        <span class="channel-dot" id="channelDot" aria-hidden="true"></span>
+        <div>
+          <strong>Telegram Bot</strong>
+          <span id="channelStatusText">正在检查配置…</span>
+        </div>
+      </div>
+
+      <form id="telegramForm" class="channel-form">
+        <label>
+          Bot Token
+          <input
+            id="telegramTokenInput"
+            type="password"
+            autocomplete="off"
+            spellcheck="false"
+            placeholder="从 @BotFather 获取，例如 123456:ABC..."
+            maxlength="200"
+          >
+        </label>
+        <p class="channel-note">保存前会调用 Telegram getMe 验证。Token 只保存在服务器数据库，不会回显到页面。</p>
+        <div class="channel-actions">
+          <button class="primary" type="submit" id="telegramSaveBtn">保存并连接</button>
+          <button class="ghost" type="button" id="telegramClearBtn" hidden>清除 Token</button>
+        </div>
+        <div id="channelError" class="form-error" hidden></div>
+      </form>
+
+      <div class="channel-help">
+        <strong>怎么获取 Token？</strong>
+        <p>在 Telegram 搜索 <code>@BotFather</code>，发送 <code>/newbot</code>，按提示创建机器人，复制它返回的 Token。</p>
+      </div>
+
+      <div class="channel-divider"></div>
+
+      <div class="channel-status" id="whatsappStatus">
+        <span class="channel-dot" id="whatsappDot" aria-hidden="true"></span>
+        <div>
+          <strong>WhatsApp Cloud API</strong>
+          <span id="whatsappStatusText">正在检查配置…</span>
+        </div>
+      </div>
+
+      <form id="whatsappForm" class="channel-form">
+        <label>
+          WhatsApp 访问 Token
+          <input
+            id="whatsappTokenInput"
+            type="password"
+            autocomplete="off"
+            spellcheck="false"
+            placeholder="Meta 永久访问 Token"
+            maxlength="1000"
+          >
+        </label>
+        <label>
+          Phone Number ID
+          <input
+            id="whatsappPhoneInput"
+            type="text"
+            autocomplete="off"
+            spellcheck="false"
+            placeholder="Meta 后台的 Phone Number ID"
+            maxlength="100"
+          >
+        </label>
+        <label>
+          Webhook Verify Token
+          <input
+            id="whatsappVerifyInput"
+            type="password"
+            autocomplete="off"
+            spellcheck="false"
+            placeholder="自定义校验串，与 Meta 后台填写一致"
+            maxlength="200"
+          >
+        </label>
+        <label>
+          App Secret
+          <input
+            id="whatsappSecretInput"
+            type="password"
+            autocomplete="off"
+            spellcheck="false"
+            placeholder="用于校验 X-Hub-Signature-256"
+            maxlength="200"
+          >
+        </label>
+        <p class="channel-note">保存前会调用 Graph API 校验 Token 和 Phone Number ID。留空的密钥字段保持原值，页面不会回显密钥。</p>
+        <div class="channel-actions">
+          <button class="primary" type="submit" id="whatsappSaveBtn">保存 WhatsApp 配置</button>
+          <button class="ghost" type="button" id="whatsappClearBtn" hidden>清除 WhatsApp 配置</button>
+        </div>
+        <div id="whatsappError" class="form-error" hidden></div>
+      </form>
+
+      <div class="channel-help">
+        <strong>Webhook 地址</strong>
+        <p><code id="whatsappWebhookUrl">/webhook/whatsapp</code></p>
+        <p>在 Meta 后台把回调地址填成上面的完整 HTTPS 地址，并填写相同的 Verify Token。App Secret 用于校验消息签名。</p>
       </div>
     </div>
   </div>
