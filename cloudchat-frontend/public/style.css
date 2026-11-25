@@ -1472,6 +1472,9 @@
 .bubble {
   position: relative;
 }
+.bubble.pending {
+  opacity: 0.55;
+}
 .chat-message-avatar {
   position: absolute;
   left: -48px;

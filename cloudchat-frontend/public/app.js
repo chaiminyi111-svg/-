@@ -1639,6 +1639,7 @@ async function loadMessages() {
 
       if (id && existingIds.has(id)) continue;
 
+      if (me && message.sender_id === me.id) clearPendingMessage(message.body);
       renderMessage(message);
 
       if (id) existingIds.add(id);
@@ -2703,13 +2704,17 @@ setComposerInputMode("text");
 
 // CLOUDCHAT_COMPOSER_PLUS_MENU_V1
 installRedEnvelopeButton();
-function renderMessage(m) {
+function renderMessage(m, pendingBody) {
   const el = document.createElement("div");
   const mine = m.sender_id === me.id;
   const recalled = Boolean(m.recalled_at);
 
   el.className = "bubble" + (mine ? " mine" : "") + (recalled ? " recalled" : "");
   if (m.id) el.dataset.messageId = m.id;
+  if (pendingBody) {
+    el.classList.add("pending");
+    el.dataset.pendingBody = pendingBody;
+  }
 
   const messageAvatar = document.createElement("div");
   messageAvatar.className = "chat-message-avatar";
@@ -2969,6 +2974,28 @@ function renderMessage(m) {
   if (wasAtBottom) {
     messagesContainer.scrollTop = messagesContainer.scrollHeight;
   }
+
+  return el;
+}
+
+function renderPendingMessage(body) {
+  if (!activeConversation || !me) return null;
+  return renderMessage({
+    id: "",
+    sender_id: me.id,
+    body,
+    created_at: new Date().toISOString(),
+    sender_display_name: me.displayName || "",
+    message_type: "text"
+  }, body);
+}
+
+function clearPendingMessage(body) {
+  try {
+    document.querySelectorAll("[data-pending-body]").forEach(el => {
+      if (el.dataset.pendingBody === body) el.remove();
+    });
+  } catch {}
 }
 
 function updateRecalledMessage(messageId) {
@@ -3177,6 +3204,7 @@ function connectSocket() {
     if (d.type !== "message") return;
     if (activeConversation !== conversationId) return;
 
+    if (me && d.message.senderId === me.id) clearPendingMessage(d.message.body);
     renderMessage({
       id: d.message.id,
       sender_id: d.message.senderId,
@@ -3213,7 +3241,26 @@ function connectSocket() {
     scheduleSidebarRefresh();
   };
 }
-$("#sendForm").onsubmit=e=>{e.preventDefault();const body=$("#messageInput").value.trim();if(!body)return;if(!socket||socket.readyState!==WebSocket.OPEN){alert("聊天连接尚未建立，请稍后重试");return}stopTyping();socket.send(JSON.stringify({body}));conversationDrafts.delete(String(activeConversation));$("#messageInput").value=""};
+$("#sendForm").onsubmit = e => {
+  e.preventDefault();
+  const body = $("#messageInput").value.trim();
+  if (!body) return;
+  if (!socket || socket.readyState !== WebSocket.OPEN) {
+    alert("聊天连接尚未建立，请稍后重试");
+    return;
+  }
+  stopTyping();
+  socket.send(JSON.stringify({ body }));
+  let pendingEl = null;
+  try {
+    pendingEl = renderPendingMessage(body);
+  } catch {}
+  setTimeout(() => {
+    if (pendingEl && pendingEl.isConnected) pendingEl.remove();
+  }, 20000);
+  conversationDrafts.delete(String(activeConversation));
+  $("#messageInput").value = "";
+};
 
 let cloudChatVoiceRecorder = null;
 let cloudChatVoiceStream = null;
