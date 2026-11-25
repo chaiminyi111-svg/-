@@ -1,0 +1,1529 @@
+const $ = (selector, root = document) => root.querySelector(selector);
+const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
+
+const state = {
+  me: null,
+  users: [],
+  teamUsers: [],
+  conversations: [],
+  counts: {},
+  activeId: null,
+  active: null,
+  messages: [],
+  hasMore: false,
+  filters: { scope: "all", status: "open", q: "" },
+  cannedReplies: [],
+  editingCannedId: null,
+  customerTags: [],
+  customerDirty: false,
+  telegramConfigured: false,
+  eventSource: null,
+  sseConnected: false,
+  fallbackTimer: null,
+  refreshTimer: null,
+  searchTimer: null,
+  threadToken: 0,
+  sending: false,
+  reading: null,
+  composing: false,
+  expiring: false
+};
+
+class ApiError extends Error {
+  constructor(message, status = 0) {
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+  }
+}
+
+async function api(path, options = {}) {
+  const init = { credentials: "same-origin", ...options };
+  if (init.body && typeof init.body === "object") {
+    init.headers = { "content-type": "application/json", ...(init.headers || {}) };
+    init.body = JSON.stringify(init.body);
+  }
+
+  let response;
+  try {
+    response = await fetch(path, init);
+  } catch {
+    throw new ApiError("无法连接服务器，请检查服务是否运行");
+  }
+
+  const text = await response.text();
+  let data = {};
+  try {
+    data = text ? JSON.parse(text) : {};
+  } catch {
+    data = { error: text.slice(0, 200) };
+  }
+
+  if (!response.ok) {
+    if (response.status === 401 && state.me) handleSessionExpired();
+    throw new ApiError(data.error || `请求失败（${response.status}）`, response.status);
+  }
+  return data;
+}
+
+let toastTimer = null;
+function showToast(message, type = "") {
+  const toast = $("#toast");
+  toast.textContent = message;
+  toast.className = "toast" + (type ? " " + type : "");
+  toast.hidden = false;
+  if (toastTimer) clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => {
+    toast.hidden = true;
+  }, 3200);
+}
+
+function setConnection(mode) {
+  const el = $("#connectionStatus");
+  if (!el) return;
+  el.classList.remove("online", "offline");
+  if (mode === "online") {
+    el.classList.add("online");
+    el.querySelector("span").textContent = "实时连接";
+  } else if (mode === "offline") {
+    el.classList.add("offline");
+    el.querySelector("span").textContent = "轮询模式";
+  } else {
+    el.querySelector("span").textContent = "连接中";
+  }
+}
+
+function handleSessionExpired() {
+  if (state.expiring) return;
+  state.expiring = true;
+  showToast("登录已过期，请重新登录", "error");
+  showLogin();
+  setTimeout(() => { state.expiring = false; }, 1200);
+}
+
+function setLoginError(message) {
+  const error = $("#loginError");
+  error.textContent = message || "";
+  error.hidden = !message;
+}
+
+async function boot() {
+  try {
+    const health = await api("/api/health");
+    state.telegramConfigured = Boolean(health.telegramConfigured);
+    const data = await api("/api/auth/me");
+    state.me = data.user;
+    await enterInbox();
+  } catch (error) {
+    if (error.status !== 401) setLoginError(error.message);
+    showLogin();
+  }
+}
+
+async function enterInbox() {
+  showInbox();
+  await loadUsers();
+  await loadConversations();
+  connectRealtime();
+  startFallbackPolling();
+}
+
+function showInbox() {
+  $("#loginView").hidden = true;
+  $("#inboxView").hidden = false;
+  $("#currentUser").textContent = `${state.me.displayName} · ${state.me.role === "admin" ? "管理员" : "客服"}`;
+  $("#teamBtn").hidden = state.me.role !== "admin";
+  renderTelegramState();
+}
+
+function showLogin() {
+  stopRealtime();
+  stopFallbackPolling();
+  state.me = null;
+  state.activeId = null;
+  state.active = null;
+  state.messages = [];
+  state.conversations = [];
+  state.counts = {};
+  state.sending = false;
+  document.body.classList.remove("mobile-chat-open");
+  $("#inboxView").hidden = true;
+  $("#loginView").hidden = false;
+  $("#teamModal").hidden = true;
+  $("#passwordModal").hidden = true;
+  $("#cannedModal").hidden = true;
+  $("#customerPanel").hidden = true;
+  state.cannedReplies = [];
+  state.editingCannedId = null;
+  state.customerTags = [];
+  state.customerDirty = false;
+  $("#chatPanel").hidden = true;
+  $("#chatEmpty").hidden = false;
+  document.title = "聚合客服台 · Telegram 统一收件箱";
+  setTimeout(() => $("#loginUsername")?.focus(), 50);
+}
+
+async function loadUsers() {
+  const data = await api(`/api/users${state.me.role === "admin" ? "?includeInactive=1" : ""}`);
+  state.users = data.users.filter(user => user.active);
+  if (state.active) renderChatHeader();
+}
+
+async function loadConversations(options = {}) {
+  const params = new URLSearchParams({
+    scope: state.filters.scope,
+    status: state.filters.status,
+    limit: "50"
+  });
+  if (state.filters.q) params.set("q", state.filters.q);
+
+  try {
+    const data = await api(`/api/conversations?${params.toString()}`);
+    state.conversations = data.items;
+    state.counts = data.counts || {};
+    renderConversationList();
+    renderCounts();
+
+    if (state.activeId) {
+      const active = data.items.find(item => item.id === state.activeId);
+      if (active) {
+        state.active = active;
+        renderChatHeader();
+      }
+    }
+    if (!state.activeId && data.items.length && window.innerWidth > 760) {
+      selectConversation(data.items[0].id);
+    }
+  } catch (error) {
+    if (!options.silent && error.status !== 401) showToast(error.message, "error");
+  }
+}
+
+function renderCounts() {
+  $("#countMine").textContent = state.counts.mine ?? 0;
+  $("#countUnassigned").textContent = state.counts.unassigned ?? 0;
+  $("#countAll").textContent = state.counts.all ?? 0;
+
+  const total = state.counts.all ?? 0;
+  const open = state.counts.open ?? 0;
+  $("#inboxSubtitle").textContent = total
+    ? `${total} 个会话 · ${open} 个待处理`
+    : "Telegram 私聊与群聊";
+}
+
+function conversationTime(iso) {
+  if (!iso) return "";
+  const date = new Date(iso);
+  if (!Number.isFinite(date.getTime())) return "";
+  const now = new Date();
+  if (isSameDay(date, now)) return `${pad(date.getHours())}:${pad(date.getMinutes())}`;
+  const yesterday = new Date(now);
+  yesterday.setDate(now.getDate() - 1);
+  if (isSameDay(date, yesterday)) return "昨天";
+  if (now.getTime() - date.getTime() < 7 * 86400000) {
+    return "周" + ["日", "一", "二", "三", "四", "五", "六"][date.getDay()];
+  }
+  return `${date.getMonth() + 1}/${date.getDate()}`;
+}
+
+function renderConversationList() {
+  const list = $("#conversationList");
+  list.replaceChildren();
+
+  if (!state.conversations.length) {
+    $("#listEmpty").hidden = false;
+    $("#listEmptyText").textContent = state.filters.q
+      ? "没有找到匹配的会话，试试其他关键词。"
+      : state.telegramConfigured
+        ? "在 Telegram 里给机器人发一条消息，就会出现在这里。"
+        : "配置 TELEGRAM_BOT_TOKEN 并重启服务后，Telegram 消息会出现在这里。";
+    updateDocumentTitle();
+    return;
+  }
+
+  $("#listEmpty").hidden = true;
+  const fragment = document.createDocumentFragment();
+
+  for (const conversation of state.conversations) {
+    const item = document.createElement("button");
+    item.type = "button";
+    item.className = "conversation-item" + (conversation.id === state.activeId ? " active" : "");
+    item.addEventListener("click", () => selectConversation(conversation.id));
+
+    const avatar = document.createElement("div");
+    avatar.className = "avatar";
+    avatar.style.setProperty("--hue", hueFor(conversation.title));
+    avatar.textContent = initials(conversation.title);
+
+    const main = document.createElement("div");
+    main.className = "conversation-main";
+
+    const top = document.createElement("div");
+    top.className = "conversation-top";
+    const title = document.createElement("strong");
+    title.textContent = conversation.title || "未命名会话";
+    const time = document.createElement("time");
+    time.textContent = conversationTime(conversation.lastMessageAt);
+    top.append(title, time);
+
+    const preview = document.createElement("div");
+    preview.className = "conversation-preview" + (conversation.unreadCount ? " unread" : "");
+    preview.textContent =
+      (conversation.lastMessageDirection === "out" ? "你：" : "") +
+      (conversation.lastMessagePreview || "暂无消息");
+
+    const meta = document.createElement("div");
+    meta.className = "conversation-meta";
+    if (conversation.assigneeName) {
+      const assignee = document.createElement("span");
+      assignee.className = "assignee-chip";
+      assignee.textContent = conversation.assigneeName;
+      meta.appendChild(assignee);
+    }
+    const status = document.createElement("span");
+    status.className = "status-chip " + conversation.status;
+    status.textContent = statusLabel(conversation.status);
+    meta.appendChild(status);
+
+    const tags = Array.isArray(conversation.tags) ? conversation.tags : [];
+    for (const tag of tags.slice(0, 2)) {
+      const chip = document.createElement("span");
+      chip.className = "tag-chip small";
+      chip.textContent = tag;
+      meta.appendChild(chip);
+    }
+    if (tags.length > 2) {
+      const more = document.createElement("span");
+      more.className = "tag-chip small";
+      more.textContent = "+" + (tags.length - 2);
+      meta.appendChild(more);
+    }
+
+    main.append(top, preview, meta);
+
+    item.append(avatar, main);
+
+    if (conversation.unreadCount > 0) {
+      const unread = document.createElement("span");
+      unread.className = "unread-badge";
+      unread.textContent = conversation.unreadCount > 99 ? "99+" : String(conversation.unreadCount);
+      item.appendChild(unread);
+    }
+
+    fragment.appendChild(item);
+  }
+
+  list.appendChild(fragment);
+  updateDocumentTitle();
+}
+
+function updateDocumentTitle() {
+  const unread = state.conversations.reduce((sum, item) => sum + Number(item.unreadCount || 0), 0);
+  document.title = unread
+    ? `(${unread}) 聚合客服台 · Telegram 收件箱`
+    : "聚合客服台 · Telegram 统一收件箱";
+}
+
+function upsertConversation(conversation) {
+  const index = state.conversations.findIndex(item => item.id === conversation.id);
+  if (index >= 0) state.conversations[index] = conversation;
+  else state.conversations.push(conversation);
+
+  state.conversations.sort((a, b) => {
+    const left = new Date(a.lastMessageAt || a.createdAt || 0).getTime();
+    const right = new Date(b.lastMessageAt || b.createdAt || 0).getTime();
+    return right - left;
+  });
+
+  if (state.activeId === conversation.id) state.active = conversation;
+}
+
+async function selectConversation(id) {
+  if (!id) return;
+  if (state.activeId === id) {
+    document.body.classList.add("mobile-chat-open");
+    $("#chatEmpty").hidden = true;
+    $("#chatPanel").hidden = false;
+    renderChatHeader();
+    markRead(id);
+    return;
+  }
+
+  const token = ++state.threadToken;
+  state.activeId = id;
+  state.active = state.conversations.find(item => item.id === id) || null;
+  state.messages = [];
+  state.hasMore = false;
+  state.customerDirty = false;
+  state.customerTags = [...(state.active?.tags || [])];
+
+  document.body.classList.add("mobile-chat-open");
+  $("#chatEmpty").hidden = true;
+  $("#chatPanel").hidden = false;
+  renderChatHeader();
+  renderMessages();
+
+  if (!state.active) {
+    try {
+      const data = await api(`/api/conversations/${id}`);
+      if (token !== state.threadToken) return;
+      state.active = data.conversation;
+      upsertConversation(data.conversation);
+      renderChatHeader();
+    } catch (error) {
+      if (token !== state.threadToken) return;
+      state.activeId = null;
+      state.active = null;
+      renderChatHeader();
+      showToast(error.message, "error");
+      return;
+    }
+  }
+
+  await loadMessages(id, token);
+  markRead(id);
+}
+
+async function loadMessages(id, token) {
+  try {
+    const data = await api(`/api/conversations/${id}/messages?limit=50`);
+    if (state.activeId !== id || token !== state.threadToken) return;
+    state.messages = data.messages;
+    state.hasMore = data.hasMore;
+    renderMessages({ scrollToBottom: true });
+  } catch (error) {
+    if (token === state.threadToken && error.status !== 401) {
+      showToast(error.message, "error");
+    }
+  }
+}
+
+async function loadMoreMessages() {
+  if (!state.activeId || !state.messages.length) return;
+  const id = state.activeId;
+  const token = state.threadToken;
+  const before = state.messages[0].createdAt;
+  const button = $("#loadMoreBtn");
+  button.disabled = true;
+
+  try {
+    const data = await api(
+      `/api/conversations/${id}/messages?limit=50&before=${encodeURIComponent(before)}`
+    );
+    if (state.activeId !== id || token !== state.threadToken) return;
+
+    const list = $("#messageList");
+    const previousHeight = list.scrollHeight;
+    const previousTop = list.scrollTop;
+    const existing = new Set(state.messages.map(message => message.id));
+    const older = data.messages.filter(message => !existing.has(message.id));
+
+    state.messages = [...older, ...state.messages];
+    state.hasMore = data.hasMore;
+    renderMessages();
+    list.scrollTop = previousTop + (list.scrollHeight - previousHeight);
+  } catch (error) {
+    showToast(error.message, "error");
+  } finally {
+    button.disabled = false;
+  }
+}
+
+function renderMessages(options = {}) {
+  const list = $("#messageList");
+  if (!list) return;
+
+  const wasNearBottom = isNearBottom();
+  list.replaceChildren();
+
+  if (!state.messages.length) {
+    const empty = document.createElement("div");
+    empty.className = "message-list-empty";
+    empty.textContent = "还没有消息";
+    list.appendChild(empty);
+  }
+
+  let lastDay = "";
+  for (const message of state.messages) {
+    const day = dayKey(message.createdAt);
+    if (day !== lastDay) {
+      lastDay = day;
+      const separator = document.createElement("div");
+      separator.className = "date-separator";
+      const label = document.createElement("span");
+      label.textContent = dayLabel(message.createdAt);
+      separator.appendChild(label);
+      list.appendChild(separator);
+    }
+    list.appendChild(buildMessageRow(message));
+  }
+
+  $("#loadMoreWrap").hidden = !state.hasMore;
+  $("#loadMoreBtn").disabled = false;
+
+  if (options.scrollToBottom || wasNearBottom) {
+    list.scrollTop = list.scrollHeight;
+  }
+}
+
+function buildMessageRow(message) {
+  const out = message.direction === "out";
+  const row = document.createElement("div");
+  row.className = "message-row " + (out ? "out" : "in");
+
+  if (!out) {
+    const avatar = document.createElement("div");
+    avatar.className = "message-avatar";
+    avatar.style.setProperty("--hue", hueFor(message.senderName));
+    avatar.textContent = initials(message.senderName);
+    row.appendChild(avatar);
+  }
+
+  const stack = document.createElement("div");
+  stack.className = "message-stack";
+
+  if (!out) {
+    const sender = document.createElement("div");
+    sender.className = "message-sender";
+    sender.textContent = message.senderName || "联系人";
+    stack.appendChild(sender);
+  }
+
+  const bubble = document.createElement("div");
+  bubble.className = "bubble";
+  appendMessageContent(bubble, message);
+
+  const time = document.createElement("div");
+  time.className = "message-time";
+  time.textContent = messageTime(message.createdAt);
+
+  stack.append(bubble, time);
+  row.appendChild(stack);
+  return row;
+}
+
+function appendMessageContent(bubble, message) {
+  const type = message.type || "text";
+  const meta = message.meta || {};
+  const body = String(message.body || "");
+  const mediaUrl = `/api/messages/${encodeURIComponent(message.id)}/media`;
+
+  if (type === "photo") {
+    if (state.telegramConfigured) {
+      const image = document.createElement("img");
+      image.className = "message-media";
+      image.loading = "lazy";
+      image.decoding = "async";
+      image.alt = meta.fileName || "Telegram 图片";
+      image.src = mediaUrl;
+      image.addEventListener("click", () => window.open(mediaUrl, "_blank", "noopener,noreferrer"));
+      bubble.appendChild(image);
+    } else {
+      bubble.appendChild(document.createTextNode("[图片]"));
+    }
+    if (body && body !== "[图片]") appendCaption(bubble, body);
+    return;
+  }
+
+  if (type === "document") {
+    if (state.telegramConfigured) {
+      const link = document.createElement("a");
+      link.className = "file-link";
+      link.href = mediaUrl;
+      link.download = meta.fileName || "telegram-file";
+      link.textContent = "📎 " + (meta.fileName || "下载文件");
+      bubble.appendChild(link);
+    } else {
+      bubble.appendChild(document.createTextNode(body || "[文件]"));
+    }
+    if (body && !body.startsWith("[文件]")) appendCaption(bubble, body);
+    return;
+  }
+
+  if (type === "voice" || type === "audio") {
+    if (state.telegramConfigured) {
+      const audio = document.createElement("audio");
+      audio.className = "audio-player";
+      audio.controls = true;
+      audio.preload = "none";
+      audio.src = mediaUrl;
+      bubble.appendChild(audio);
+    } else {
+      bubble.appendChild(document.createTextNode(body || "[语音]"));
+    }
+    if (body && !body.startsWith("[语音]") && !body.startsWith("[音频]")) appendCaption(bubble, body);
+    return;
+  }
+
+  if (type === "video" || type === "video_note") {
+    if (state.telegramConfigured) {
+      const video = document.createElement("video");
+      video.className = "video-player";
+      video.controls = true;
+      video.preload = "metadata";
+      video.src = mediaUrl;
+      bubble.appendChild(video);
+    } else {
+      bubble.appendChild(document.createTextNode(body || "[视频]"));
+    }
+    if (body && !body.startsWith("[视频]")) appendCaption(bubble, body);
+    return;
+  }
+
+  if (type === "sticker") {
+    if (state.telegramConfigured) {
+      const image = document.createElement("img");
+      image.className = "message-media";
+      image.loading = "lazy";
+      image.alt = "贴纸";
+      image.src = mediaUrl;
+      bubble.appendChild(image);
+    } else {
+      bubble.appendChild(document.createTextNode(body || "[贴纸]"));
+    }
+    return;
+  }
+
+  bubble.appendChild(document.createTextNode(body || "（空消息）"));
+}
+
+function appendCaption(bubble, text) {
+  const caption = document.createElement("div");
+  caption.className = "message-caption";
+  caption.textContent = text;
+  bubble.appendChild(caption);
+}
+
+function renderChatHeader() {
+  const conversation = state.active;
+  if (!conversation) {
+    $("#chatPanel").hidden = true;
+    $("#chatEmpty").hidden = false;
+    return;
+  }
+
+  $("#chatEmpty").hidden = true;
+  $("#chatPanel").hidden = false;
+
+  const avatar = $("#chatAvatar");
+  avatar.style.setProperty("--hue", hueFor(conversation.title));
+  avatar.textContent = initials(conversation.title);
+
+  $("#chatTitle").textContent = conversation.title || "未命名会话";
+  const typeLabel = conversation.chatType === "private" ? "私聊" : "群聊";
+  $("#chatSubtitle").textContent =
+    (conversation.username ? "@" + conversation.username + " · " : "") +
+    typeLabel + " · ID " + conversation.chatId;
+
+  $("#statusSelect").value = conversation.status;
+  renderAssigneeOptions(conversation);
+  renderTelegramState();
+  renderCustomerPanel();
+}
+
+function renderAssigneeOptions(conversation) {
+  const select = $("#assigneeSelect");
+  select.replaceChildren();
+
+  const addOption = (value, label, disabled = false) => {
+    const option = document.createElement("option");
+    option.value = value === null ? "" : String(value);
+    option.textContent = label;
+    option.disabled = disabled;
+    select.appendChild(option);
+  };
+
+  addOption(null, "未分配");
+
+  if (state.me.role === "admin") {
+    for (const user of state.users) {
+      addOption(user.id, user.displayName);
+    }
+    if (
+      conversation.assigneeId &&
+      !state.users.some(user => user.id === conversation.assigneeId)
+    ) {
+      addOption(conversation.assigneeId, (conversation.assigneeName || "已停用客服") + "（已停用）", true);
+    }
+  } else {
+    if (conversation.assigneeId && conversation.assigneeId !== state.me.id) {
+      addOption(conversation.assigneeId, (conversation.assigneeName || "其他客服") + "（当前）", true);
+    }
+    addOption(state.me.id, "我");
+  }
+
+  select.value = conversation.assigneeId ? String(conversation.assigneeId) : "";
+
+  const claim = $("#claimBtn");
+  if (state.me.role === "admin") {
+    claim.hidden = true;
+  } else {
+    claim.hidden = false;
+    claim.textContent = conversation.assigneeId === state.me.id ? "取消分配" : "分配给我";
+  }
+}
+
+function renderTelegramState() {
+  const configured = state.telegramConfigured;
+  $("#telegramWarning").hidden = configured;
+  $("#setupHint").hidden = configured;
+
+  const input = $("#messageInput");
+  const send = $("#sendBtn");
+  input.disabled = !configured;
+  send.disabled = !configured || state.sending;
+  input.placeholder = configured
+    ? "输入回复，Enter 发送，Shift + Enter 换行"
+    : "未配置 TELEGRAM_BOT_TOKEN，暂时无法发送";
+}
+
+async function updateConversation(payload) {
+  if (!state.active) return;
+  try {
+    const data = await api(`/api/conversations/${state.active.id}`, {
+      method: "PATCH",
+      body: payload
+    });
+    state.active = data.conversation;
+    upsertConversation(data.conversation);
+    renderChatHeader();
+    renderConversationList();
+    scheduleRefresh();
+    showToast("会话已更新", "success");
+  } catch (error) {
+    showToast(error.message, "error");
+    renderChatHeader();
+  }
+}
+
+async function markRead(id, options = {}) {
+  const conversation = state.conversations.find(item => item.id === id) ||
+    (state.activeId === id ? state.active : null);
+  if (!conversation || !conversation.unreadCount || state.reading === id) return;
+  state.reading = id;
+  try {
+    await api(`/api/conversations/${id}/read`, { method: "POST" });
+    conversation.unreadCount = 0;
+    if (state.activeId === id && state.active) state.active.unreadCount = 0;
+    renderConversationList();
+  } catch (error) {
+    if (!options.silent && error.status !== 401) showToast(error.message, "error");
+  } finally {
+    state.reading = null;
+  }
+}
+
+function connectRealtime() {
+  stopRealtime();
+  setConnection("connecting");
+  try {
+    const source = new EventSource("/api/events");
+    state.eventSource = source;
+    source.onopen = () => {
+      state.sseConnected = true;
+      setConnection("online");
+    };
+    source.onerror = () => {
+      state.sseConnected = false;
+      setConnection("offline");
+    };
+    source.onmessage = event => {
+      try {
+        handleRealtime(JSON.parse(event.data));
+      } catch {}
+    };
+  } catch {
+    setConnection("offline");
+  }
+}
+
+function stopRealtime() {
+  if (state.eventSource) {
+    state.eventSource.close();
+    state.eventSource = null;
+  }
+  state.sseConnected = false;
+}
+
+function startFallbackPolling() {
+  stopFallbackPolling();
+  state.fallbackTimer = setInterval(() => {
+    if (state.sseConnected) return;
+    loadConversations({ silent: true });
+    if (state.activeId) refreshActiveThread();
+  }, 10000);
+}
+
+function stopFallbackPolling() {
+  if (state.fallbackTimer) clearInterval(state.fallbackTimer);
+  state.fallbackTimer = null;
+}
+
+function handleRealtime(event) {
+  if (!event || !event.type) return;
+
+  if (event.conversation) {
+    upsertConversation(event.conversation);
+    if (state.activeId === event.conversation.id) state.active = event.conversation;
+  }
+
+  if (event.type === "message.created" || event.type === "message.updated") {
+    if (event.message && state.activeId === event.conversation?.id) {
+      const nearBottom = isNearBottom();
+      upsertMessage(event.message);
+      renderMessages({ scrollToBottom: nearBottom });
+      if (document.visibilityState === "visible") markRead(state.activeId, { silent: true });
+    }
+    renderConversationList();
+    if (state.active) renderChatHeader();
+    scheduleRefresh();
+    return;
+  }
+
+  if (event.type === "conversation.created" || event.type === "conversation.updated") {
+    renderConversationList();
+    if (state.activeId === event.conversation?.id) renderChatHeader();
+    scheduleRefresh();
+    return;
+  }
+
+  if (event.type === "conversation.read") {
+    const conversation = state.conversations.find(item => item.id === event.conversationId);
+    if (conversation) conversation.unreadCount = 0;
+    if (state.activeId === event.conversationId && state.active) state.active.unreadCount = 0;
+    renderConversationList();
+  }
+}
+
+function upsertMessage(message) {
+  const index = state.messages.findIndex(item => item.id === message.id);
+  if (index >= 0) state.messages[index] = message;
+  else state.messages.push(message);
+
+  state.messages.sort((a, b) => {
+    const left = new Date(a.createdAt || 0).getTime();
+    const right = new Date(b.createdAt || 0).getTime();
+    return left - right || a.id - b.id;
+  });
+}
+
+function scheduleRefresh() {
+  if (state.refreshTimer) clearTimeout(state.refreshTimer);
+  state.refreshTimer = setTimeout(() => {
+    loadConversations({ silent: true });
+  }, 600);
+}
+
+async function refreshActiveThread() {
+  if (!state.activeId) return;
+  const id = state.activeId;
+  const token = state.threadToken;
+  try {
+    const data = await api(`/api/conversations/${id}/messages?limit=50`);
+    if (state.activeId !== id || token !== state.threadToken) return;
+
+    const existing = new Map(state.messages.map(message => [message.id, message]));
+    let added = 0;
+    for (const message of data.messages) {
+      if (!existing.has(message.id)) added++;
+      existing.set(message.id, message);
+    }
+    if (!added) return;
+
+    state.messages = [...existing.values()].sort((a, b) => {
+      return new Date(a.createdAt || 0) - new Date(b.createdAt || 0) || a.id - b.id;
+    });
+    if (state.messages.length <= data.messages.length) state.hasMore = data.hasMore;
+    const nearBottom = isNearBottom();
+    renderMessages({ scrollToBottom: nearBottom });
+    markRead(id, { silent: true });
+  } catch {}
+}
+
+async function sendMessage() {
+  if (!state.active || state.sending) return;
+  const input = $("#messageInput");
+  const text = input.value.trim();
+  if (!text) return;
+  if (!state.telegramConfigured) {
+    showToast("未配置 TELEGRAM_BOT_TOKEN，无法发送", "error");
+    return;
+  }
+
+  state.sending = true;
+  const button = $("#sendBtn");
+  button.disabled = true;
+  button.textContent = "发送中…";
+
+  try {
+    const data = await api(`/api/conversations/${state.active.id}/messages`, {
+      method: "POST",
+      body: { text }
+    });
+
+    if (state.activeId === data.conversation.id) {
+      state.active = data.conversation;
+      upsertConversation(data.conversation);
+      upsertMessage(data.message);
+      renderMessages({ scrollToBottom: true });
+      renderChatHeader();
+      renderConversationList();
+    }
+    input.value = "";
+    updateCharCount();
+    autoResize(input);
+    showToast("已发送", "success");
+  } catch (error) {
+    showToast(error.message, "error");
+  } finally {
+    state.sending = false;
+    button.textContent = "发送";
+    button.disabled = !state.telegramConfigured;
+    input.focus();
+  }
+}
+
+/* ---------- Customer profile ---------- */
+function renderCustomerPanel() {
+  const conversation = state.active;
+  if (!conversation) return;
+
+  if (!state.customerDirty) {
+    state.customerTags = Array.isArray(conversation.tags) ? [...conversation.tags] : [];
+    const notes = $("#customerNotes");
+    if (notes && document.activeElement !== notes) notes.value = conversation.notes || "";
+    const hint = $("#customerDirtyHint");
+    if (hint) hint.textContent = "标签和备注仅团队可见";
+  }
+
+  renderTagList();
+}
+
+function renderTagList() {
+  const list = $("#tagList");
+  if (!list) return;
+  list.replaceChildren();
+
+  if (!state.customerTags.length) {
+    const empty = document.createElement("span");
+    empty.className = "tag-empty";
+    empty.textContent = "还没有标签";
+    list.appendChild(empty);
+    return;
+  }
+
+  for (const tag of state.customerTags) {
+    const chip = document.createElement("span");
+    chip.className = "tag-chip";
+    chip.append(document.createTextNode(tag));
+
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.textContent = "×";
+    remove.setAttribute("aria-label", `移除标签 ${tag}`);
+    remove.addEventListener("click", () => removeCustomerTag(tag));
+    chip.appendChild(remove);
+    list.appendChild(chip);
+  }
+}
+
+function markCustomerDirty() {
+  state.customerDirty = true;
+  const hint = $("#customerDirtyHint");
+  if (hint) hint.textContent = "有未保存的修改";
+}
+
+function addCustomerTag(raw) {
+  const tag = String(raw || "").trim();
+  if (!tag) return;
+  if (tag.length > 20) return showToast("标签最多 20 个字符", "error");
+  if (state.customerTags.length >= 8) return showToast("最多添加 8 个标签", "error");
+  if (state.customerTags.includes(tag)) return showToast("这个标签已经存在", "error");
+
+  state.customerTags.push(tag);
+  markCustomerDirty();
+  renderTagList();
+  $("#tagInput").value = "";
+}
+
+function removeCustomerTag(tag) {
+  state.customerTags = state.customerTags.filter(item => item !== tag);
+  markCustomerDirty();
+  renderTagList();
+}
+
+async function saveCustomerProfile() {
+  if (!state.active) return;
+  const button = $("#saveCustomerBtn");
+  button.disabled = true;
+  button.textContent = "保存中…";
+
+  try {
+    const data = await api(`/api/conversations/${state.active.id}`, {
+      method: "PATCH",
+      body: {
+        tags: state.customerTags,
+        notes: $("#customerNotes").value
+      }
+    });
+    state.active = data.conversation;
+    upsertConversation(data.conversation);
+    state.customerDirty = false;
+    renderChatHeader();
+    renderConversationList();
+    showToast("客户资料已保存", "success");
+  } catch (error) {
+    showToast(error.message, "error");
+  } finally {
+    button.disabled = false;
+    button.textContent = "保存资料";
+  }
+}
+
+/* ---------- Canned replies ---------- */
+async function openCannedModal() {
+  if (!state.active) {
+    showToast("先选择一个会话", "error");
+    return;
+  }
+  $("#cannedModal").hidden = false;
+  resetCannedForm();
+  await loadCannedReplies();
+}
+
+function resetCannedForm() {
+  state.editingCannedId = null;
+  $("#cannedForm").reset();
+  $("#cannedFormTitle").textContent = "新增快捷回复";
+  $("#cannedCancel").hidden = true;
+  $("#cannedError").hidden = true;
+}
+
+async function loadCannedReplies() {
+  try {
+    const data = await api("/api/canned-replies");
+    state.cannedReplies = data.items || [];
+    renderCannedReplies();
+  } catch (error) {
+    showToast(error.message, "error");
+  }
+}
+
+function renderCannedReplies() {
+  const list = $("#cannedList");
+  list.replaceChildren();
+
+  if (!state.cannedReplies.length) {
+    const empty = document.createElement("div");
+    empty.className = "canned-empty";
+    empty.textContent = "还没有快捷回复。在右侧新增一条常用话术，之后就能一键插入。";
+    list.appendChild(empty);
+    return;
+  }
+
+  for (const reply of state.cannedReplies) {
+    const item = document.createElement("div");
+    item.className = "canned-item";
+
+    const head = document.createElement("div");
+    head.className = "canned-item-head";
+    const title = document.createElement("strong");
+    title.textContent = reply.title;
+    const meta = document.createElement("span");
+    meta.textContent = reply.createdByName || "团队";
+    head.append(title, meta);
+
+    const content = document.createElement("p");
+    content.textContent = reply.content;
+
+    const actions = document.createElement("div");
+    actions.className = "canned-actions";
+
+    const insert = document.createElement("button");
+    insert.type = "button";
+    insert.className = "mini-button";
+    insert.textContent = "插入";
+    insert.addEventListener("click", () => insertCannedReply(reply));
+    actions.appendChild(insert);
+
+    const canManage = state.me.role === "admin" || reply.createdBy === state.me.id;
+    if (canManage) {
+      const edit = document.createElement("button");
+      edit.type = "button";
+      edit.className = "mini-button";
+      edit.textContent = "编辑";
+      edit.addEventListener("click", () => editCannedReply(reply));
+      actions.appendChild(edit);
+
+      const remove = document.createElement("button");
+      remove.type = "button";
+      remove.className = "mini-button danger";
+      remove.textContent = "删除";
+      remove.addEventListener("click", () => deleteCannedReply(reply));
+      actions.appendChild(remove);
+    }
+
+    item.append(head, content, actions);
+    list.appendChild(item);
+  }
+}
+
+function insertCannedReply(reply) {
+  const input = $("#messageInput");
+  const current = input.value.trimEnd();
+  input.value = current ? `${current}\n${reply.content}` : reply.content;
+  updateCharCount();
+  autoResize(input);
+  $("#cannedModal").hidden = true;
+  input.focus();
+  showToast("已插入快捷回复", "success");
+}
+
+function editCannedReply(reply) {
+  state.editingCannedId = reply.id;
+  $("#cannedFormTitle").textContent = "编辑快捷回复";
+  $("#cannedTitle").value = reply.title;
+  $("#cannedContent").value = reply.content;
+  $("#cannedCancel").hidden = false;
+  $("#cannedError").hidden = true;
+  $("#cannedTitle").focus();
+}
+
+async function saveCannedReply(event) {
+  event.preventDefault();
+  const errorBox = $("#cannedError");
+  errorBox.hidden = true;
+  const title = $("#cannedTitle").value.trim();
+  const content = $("#cannedContent").value.trim();
+
+  if (!title || title.length > 40) {
+    errorBox.textContent = "标题需为 1-40 个字符";
+    errorBox.hidden = false;
+    return;
+  }
+  if (!content || content.length > 2000) {
+    errorBox.textContent = "内容需为 1-2000 个字符";
+    errorBox.hidden = false;
+    return;
+  }
+
+  const editing = state.editingCannedId;
+  const button = event.target.querySelector('button[type="submit"]');
+  button.disabled = true;
+
+  try {
+    await api(editing ? `/api/canned-replies/${editing}` : "/api/canned-replies", {
+      method: editing ? "PATCH" : "POST",
+      body: { title, content }
+    });
+    showToast(editing ? "快捷回复已更新" : "快捷回复已创建", "success");
+    resetCannedForm();
+    await loadCannedReplies();
+  } catch (error) {
+    errorBox.textContent = error.message;
+    errorBox.hidden = false;
+  } finally {
+    button.disabled = false;
+  }
+}
+
+async function deleteCannedReply(reply) {
+  if (!window.confirm(`确定删除快捷回复「${reply.title}」吗？`)) return;
+  try {
+    await api(`/api/canned-replies/${reply.id}`, { method: "DELETE" });
+    if (state.editingCannedId === reply.id) resetCannedForm();
+    showToast("快捷回复已删除", "success");
+    await loadCannedReplies();
+  } catch (error) {
+    showToast(error.message, "error");
+  }
+}
+
+/* ---------- Team ---------- */
+async function openTeamModal() {
+  if (state.me.role !== "admin") return;
+  $("#teamModal").hidden = false;
+  $("#createUserError").hidden = true;
+  await loadTeamUsers();
+}
+
+async function loadTeamUsers() {
+  try {
+    const data = await api("/api/users?includeInactive=1");
+    state.teamUsers = data.users;
+    renderTeamUsers();
+  } catch (error) {
+    showToast(error.message, "error");
+  }
+}
+
+function renderTeamUsers() {
+  const list = $("#teamList");
+  list.replaceChildren();
+
+  for (const user of state.teamUsers) {
+    const row = document.createElement("div");
+    row.className = "team-row" + (user.active ? "" : " inactive");
+
+    const avatar = document.createElement("div");
+    avatar.className = "avatar";
+    avatar.style.setProperty("--hue", hueFor(user.displayName));
+    avatar.textContent = initials(user.displayName);
+
+    const info = document.createElement("div");
+    info.className = "team-info";
+    const name = document.createElement("strong");
+    name.textContent = user.displayName + (user.id === state.me.id ? "（我）" : "");
+    const username = document.createElement("span");
+    username.textContent = "@" + user.username + (user.active ? "" : " · 已停用");
+    info.append(name, username);
+
+    const controls = document.createElement("div");
+    controls.className = "team-controls";
+
+    const role = document.createElement("select");
+    role.setAttribute("aria-label", "角色");
+    role.innerHTML = '<option value="agent">客服</option><option value="admin">管理员</option>';
+    role.value = user.role;
+    role.disabled = !user.active;
+    role.addEventListener("change", () => updateTeamUser(user.id, { role: role.value }));
+
+    const toggle = document.createElement("button");
+    toggle.type = "button";
+    toggle.className = "mini-button" + (user.active ? " danger" : "");
+    toggle.textContent = user.active ? "停用" : "启用";
+    toggle.disabled = user.id === state.me.id;
+    toggle.addEventListener("click", () => updateTeamUser(user.id, { active: !user.active }));
+
+    const reset = document.createElement("button");
+    reset.type = "button";
+    reset.className = "mini-button";
+    reset.textContent = "重置密码";
+    reset.addEventListener("click", () => resetUserPassword(user));
+
+    controls.append(role, toggle, reset);
+    row.append(avatar, info, controls);
+    list.appendChild(row);
+  }
+}
+
+async function updateTeamUser(id, payload) {
+  try {
+    const data = await api(`/api/users/${id}`, { method: "PATCH", body: payload });
+    if (data.user.id === state.me.id) {
+      state.me = data.user;
+      $("#currentUser").textContent = `${state.me.displayName} · ${state.me.role === "admin" ? "管理员" : "客服"}`;
+      $("#teamBtn").hidden = state.me.role !== "admin";
+      if (state.me.role !== "admin") $("#teamModal").hidden = true;
+    }
+    showToast("成员已更新", "success");
+    await Promise.all([loadUsers(), loadTeamUsers()]);
+    scheduleRefresh();
+    if (state.active) renderChatHeader();
+  } catch (error) {
+    showToast(error.message, "error");
+    await loadTeamUsers();
+  }
+}
+
+async function resetUserPassword(user) {
+  const password = window.prompt(`为 ${user.displayName} 设置新密码（至少 8 位）`);
+  if (password === null) return;
+  if (password.length < 8) {
+    showToast("密码至少 8 位", "error");
+    return;
+  }
+  try {
+    await api(`/api/users/${user.id}/password`, { method: "POST", body: { password } });
+    showToast("密码已重置", "success");
+  } catch (error) {
+    showToast(error.message, "error");
+  }
+}
+
+/* ---------- Helpers ---------- */
+function isSameDay(left, right) {
+  return left.getFullYear() === right.getFullYear() &&
+    left.getMonth() === right.getMonth() &&
+    left.getDate() === right.getDate();
+}
+
+function dayKey(iso) {
+  const date = new Date(iso);
+  if (!Number.isFinite(date.getTime())) return "";
+  return `${date.getFullYear()}-${date.getMonth() + 1}-${date.getDate()}`;
+}
+
+function dayLabel(iso) {
+  const date = new Date(iso);
+  const now = new Date();
+  if (isSameDay(date, now)) return "今天";
+  const yesterday = new Date(now);
+  yesterday.setDate(now.getDate() - 1);
+  if (isSameDay(date, yesterday)) return "昨天";
+  return `${date.getMonth() + 1}月${date.getDate()}日`;
+}
+
+function messageTime(iso) {
+  const date = new Date(iso);
+  if (!Number.isFinite(date.getTime())) return "";
+  return `${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
+function pad(value) {
+  return String(value).padStart(2, "0");
+}
+
+function isNearBottom() {
+  const list = $("#messageList");
+  if (!list) return true;
+  return list.scrollHeight - list.scrollTop - list.clientHeight < 120;
+}
+
+function initials(name) {
+  const value = String(name || "?").trim();
+  if (!value) return "?";
+  const parts = value.split(/\s+/).filter(Boolean);
+  if (parts.length > 1) {
+    return (parts[0][0] + parts[1][0]).toUpperCase();
+  }
+  return Array.from(value).slice(0, 2).join("").toUpperCase();
+}
+
+function hueFor(value) {
+  let hash = 0;
+  for (const char of String(value || "")) hash = (hash * 31 + char.charCodeAt(0)) % 360;
+  return hash;
+}
+
+function statusLabel(status) {
+  return { open: "待处理", pending: "跟进中", closed: "已关闭" }[status] || status;
+}
+
+function updateCharCount() {
+  const input = $("#messageInput");
+  $("#charCount").textContent = `${input.value.length} / 4096`;
+}
+
+function autoResize(element) {
+  element.style.height = "auto";
+  element.style.height = Math.min(element.scrollHeight, 150) + "px";
+}
+
+/* ---------- Events ---------- */
+function bindEvents() {
+  $("#loginForm").addEventListener("submit", async event => {
+    event.preventDefault();
+    const button = $("#loginButton");
+    button.disabled = true;
+    setLoginError("");
+    try {
+      const data = await api("/api/auth/login", {
+        method: "POST",
+        body: {
+          username: $("#loginUsername").value,
+          password: $("#loginPassword").value
+        }
+      });
+      state.me = data.user;
+      $("#loginForm").reset();
+      await enterInbox();
+    } catch (error) {
+      setLoginError(error.message);
+    } finally {
+      button.disabled = false;
+    }
+  });
+
+  $("#logoutBtn").addEventListener("click", async () => {
+    try {
+      await api("/api/auth/logout", { method: "POST" });
+    } catch {}
+    showLogin();
+  });
+
+  $("#refreshBtn").addEventListener("click", async () => {
+    await loadConversations();
+    if (state.activeId) await refreshActiveThread();
+    showToast("已刷新", "success");
+  });
+
+  $("#searchInput").addEventListener("input", event => {
+    if (state.searchTimer) clearTimeout(state.searchTimer);
+    state.filters.q = event.target.value.trim();
+    state.searchTimer = setTimeout(() => loadConversations(), 300);
+  });
+
+  $$(".scope-tab").forEach(tab => {
+    tab.addEventListener("click", () => {
+      $$(".scope-tab").forEach(item => item.classList.toggle("active", item === tab));
+      state.filters.scope = tab.dataset.scope;
+      loadConversations();
+    });
+  });
+
+  $$(".status-tab").forEach(tab => {
+    tab.addEventListener("click", () => {
+      $$(".status-tab").forEach(item => item.classList.toggle("active", item === tab));
+      state.filters.status = tab.dataset.status;
+      loadConversations();
+    });
+  });
+
+  $("#statusSelect").addEventListener("change", event => {
+    updateConversation({ status: event.target.value });
+  });
+
+  $("#assigneeSelect").addEventListener("change", event => {
+    const value = event.target.value;
+    updateConversation({ assigneeId: value ? Number(value) : null });
+  });
+
+  $("#claimBtn").addEventListener("click", () => {
+    if (!state.active) return;
+    const next = state.active.assigneeId === state.me.id ? null : state.me.id;
+    updateConversation({ assigneeId: next });
+  });
+
+  $("#loadMoreBtn").addEventListener("click", loadMoreMessages);
+
+  $("#customerBtn").addEventListener("click", () => {
+    const panel = $("#customerPanel");
+    panel.hidden = !panel.hidden;
+    if (!panel.hidden) renderCustomerPanel();
+  });
+  $("#customerClose").addEventListener("click", () => { $("#customerPanel").hidden = true; });
+  $("#tagForm").addEventListener("submit", event => {
+    event.preventDefault();
+    addCustomerTag($("#tagInput").value);
+  });
+  $("#customerNotes").addEventListener("input", markCustomerDirty);
+  $("#saveCustomerBtn").addEventListener("click", saveCustomerProfile);
+
+  $("#cannedBtn").addEventListener("click", openCannedModal);
+  $("#cannedClose").addEventListener("click", () => { $("#cannedModal").hidden = true; });
+  $("#cannedModal").addEventListener("click", event => {
+    if (event.target === $("#cannedModal")) $("#cannedModal").hidden = true;
+  });
+  $("#cannedForm").addEventListener("submit", saveCannedReply);
+  $("#cannedCancel").addEventListener("click", resetCannedForm);
+
+  const input = $("#messageInput");
+  input.addEventListener("input", () => {
+    updateCharCount();
+    autoResize(input);
+  });
+  input.addEventListener("compositionstart", () => { state.composing = true; });
+  input.addEventListener("compositionend", () => { state.composing = false; });
+  input.addEventListener("keydown", event => {
+    if (event.key === "Enter" && !event.shiftKey && !state.composing && !event.isComposing) {
+      event.preventDefault();
+      $("#composer").requestSubmit();
+    }
+  });
+
+  $("#composer").addEventListener("submit", event => {
+    event.preventDefault();
+    sendMessage();
+  });
+
+  $("#teamBtn").addEventListener("click", openTeamModal);
+  $("#teamClose").addEventListener("click", () => { $("#teamModal").hidden = true; });
+  $("#teamModal").addEventListener("click", event => {
+    if (event.target === $("#teamModal")) $("#teamModal").hidden = true;
+  });
+
+  $("#createUserForm").addEventListener("submit", async event => {
+    event.preventDefault();
+    const errorBox = $("#createUserError");
+    errorBox.hidden = true;
+    try {
+      await api("/api/users", {
+        method: "POST",
+        body: {
+          username: $("#newUsername").value,
+          displayName: $("#newDisplayName").value,
+          password: $("#newPassword").value,
+          role: $("#newRole").value
+        }
+      });
+      event.target.reset();
+      showToast("客服账号已创建", "success");
+      await Promise.all([loadUsers(), loadTeamUsers()]);
+    } catch (error) {
+      errorBox.textContent = error.message;
+      errorBox.hidden = false;
+    }
+  });
+
+  $("#passwordBtn").addEventListener("click", () => {
+    $("#passwordModal").hidden = false;
+    $("#passwordError").hidden = true;
+    $("#passwordForm").reset();
+  });
+  $("#passwordClose").addEventListener("click", () => { $("#passwordModal").hidden = true; });
+  $("#passwordModal").addEventListener("click", event => {
+    if (event.target === $("#passwordModal")) $("#passwordModal").hidden = true;
+  });
+
+  $("#passwordForm").addEventListener("submit", async event => {
+    event.preventDefault();
+    const errorBox = $("#passwordError");
+    errorBox.hidden = true;
+    const currentPassword = $("#currentPassword").value;
+    const newPassword = $("#newPasswordSelf").value;
+    const confirmPassword = $("#confirmPassword").value;
+
+    if (newPassword !== confirmPassword) {
+      errorBox.textContent = "两次输入的新密码不一致";
+      errorBox.hidden = false;
+      return;
+    }
+
+    try {
+      await api("/api/auth/password", {
+        method: "POST",
+        body: { currentPassword, newPassword }
+      });
+      showToast("密码已修改", "success");
+      $("#passwordModal").hidden = true;
+      event.target.reset();
+    } catch (error) {
+      errorBox.textContent = error.message;
+      errorBox.hidden = false;
+    }
+  });
+
+  $("#mobileBack").addEventListener("click", () => {
+    document.body.classList.remove("mobile-chat-open");
+  });
+
+  document.addEventListener("keydown", event => {
+    if (event.key === "Escape") {
+      $("#teamModal").hidden = true;
+      $("#passwordModal").hidden = true;
+      $("#cannedModal").hidden = true;
+    }
+  });
+
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible" && state.activeId) {
+      markRead(state.activeId, { silent: true });
+      refreshActiveThread();
+    }
+  });
+
+  window.addEventListener("online", () => setConnection(state.sseConnected ? "online" : "offline"));
+  window.addEventListener("offline", () => setConnection("offline"));
+}
+
+function init() {
+  bindEvents();
+  boot();
+}
+
+if (document.readyState === "loading") {
+  document.addEventListener("DOMContentLoaded", init);
+} else {
+  init();
+}

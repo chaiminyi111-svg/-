@@ -1,0 +1,295 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <meta name="theme-color" content="#229ED9">
+  <title>聚合客服台 · Telegram 统一收件箱</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <section id="loginView" class="login-view">
+    <div class="login-card">
+      <div class="login-brand">
+        <div class="brand-mark">TG</div>
+        <div>
+          <strong>聚合客服台</strong>
+          <span>Telegram 统一收件箱</span>
+        </div>
+      </div>
+      <h1>登录客服工作台</h1>
+      <p class="login-desc">集中接收 Telegram 消息，分配客服、跟进客户、统一回复。</p>
+      <form id="loginForm" class="login-form">
+        <label>
+          用户名
+          <input id="loginUsername" name="username" autocomplete="username" required autofocus>
+        </label>
+        <label>
+          密码
+          <input id="loginPassword" name="password" type="password" autocomplete="current-password" required>
+        </label>
+        <button id="loginButton" class="primary" type="submit">登录</button>
+        <div id="loginError" class="form-error" hidden></div>
+      </form>
+      <p class="login-foot">私有化部署 · 数据保存在你的服务器</p>
+    </div>
+  </section>
+
+  <section id="inboxView" class="inbox-view" hidden>
+    <header class="topbar">
+      <div class="brand">
+        <div class="brand-mark small">TG</div>
+        <div class="brand-text">
+          <strong>聚合客服台</strong>
+          <span>Telegram 统一收件箱</span>
+        </div>
+      </div>
+      <div class="topbar-right">
+        <span id="connectionStatus" class="connection"><i></i><span>连接中</span></span>
+        <span id="currentUser" class="current-user"></span>
+        <button id="teamBtn" class="ghost" type="button" hidden>团队</button>
+        <button id="passwordBtn" class="ghost" type="button">修改密码</button>
+        <button id="logoutBtn" class="ghost" type="button">退出</button>
+      </div>
+    </header>
+
+    <div class="shell">
+      <aside class="sidebar">
+        <div class="sidebar-top">
+          <div>
+            <h2>收件箱</h2>
+            <p id="inboxSubtitle">Telegram 私聊与群聊</p>
+          </div>
+          <button id="refreshBtn" class="icon-button" type="button" title="刷新列表">↻</button>
+        </div>
+
+        <div class="search-box">
+          <input id="searchInput" type="search" placeholder="搜索联系人、用户名或消息" autocomplete="off">
+        </div>
+
+        <div class="scope-tabs" role="tablist" aria-label="会话范围">
+          <button class="scope-tab" type="button" data-scope="mine">我的 <span id="countMine">0</span></button>
+          <button class="scope-tab" type="button" data-scope="unassigned">未分配 <span id="countUnassigned">0</span></button>
+          <button class="scope-tab active" type="button" data-scope="all">全部 <span id="countAll">0</span></button>
+        </div>
+
+        <div class="status-tabs" role="tablist" aria-label="会话状态">
+          <button class="status-tab active" type="button" data-status="open">待处理</button>
+          <button class="status-tab" type="button" data-status="pending">跟进中</button>
+          <button class="status-tab" type="button" data-status="closed">已关闭</button>
+          <button class="status-tab" type="button" data-status="all">全部</button>
+        </div>
+
+        <div id="conversationList" class="conversation-list"></div>
+        <div id="listEmpty" class="list-empty" hidden>
+          <div class="empty-icon">💬</div>
+          <strong>还没有会话</strong>
+          <p id="listEmptyText">在 Telegram 里给机器人发一条消息，就会出现在这里。</p>
+        </div>
+      </aside>
+
+      <main class="chat">
+        <div id="chatEmpty" class="chat-empty">
+          <div class="empty-illustration">TG</div>
+          <h2>选择一个会话开始回复</h2>
+          <p>左侧集中展示 Telegram 私聊与群聊消息。分配客服、标记状态，所有回复都会通过机器人发出。</p>
+          <div id="setupHint" class="setup-hint" hidden>
+            <strong>还没有配置 Telegram 机器人</strong>
+            <p>在 <code>.env</code> 中设置 <code>TELEGRAM_BOT_TOKEN</code>，重启服务后即可收发消息。机器人 Token 从 @BotFather 获取。</p>
+          </div>
+        </div>
+
+        <section id="chatPanel" class="chat-panel" hidden>
+          <header class="chat-head">
+            <button id="mobileBack" class="mobile-back" type="button" aria-label="返回会话列表">‹</button>
+            <div class="chat-identity">
+              <div id="chatAvatar" class="avatar large">?</div>
+              <div class="chat-title-block">
+                <h2 id="chatTitle">会话</h2>
+                <p id="chatSubtitle"></p>
+              </div>
+            </div>
+            <div class="chat-actions">
+              <button id="customerBtn" class="ghost" type="button">资料</button>
+              <label class="select-label">
+                <span>状态</span>
+                <select id="statusSelect">
+                  <option value="open">待处理</option>
+                  <option value="pending">跟进中</option>
+                  <option value="closed">已关闭</option>
+                </select>
+              </label>
+              <label class="select-label" id="assigneeLabel">
+                <span>客服</span>
+                <select id="assigneeSelect"></select>
+              </label>
+              <button id="claimBtn" class="ghost" type="button" hidden>分配给我</button>
+            </div>
+          </header>
+
+          <div id="telegramWarning" class="warning" hidden>
+            未配置 <code>TELEGRAM_BOT_TOKEN</code>，当前只能查看本地数据，无法发送回复。
+          </div>
+
+          <section id="customerPanel" class="customer-panel" hidden>
+            <div class="customer-panel-head">
+              <div>
+                <strong>客户资料</strong>
+                <span>标签和备注仅团队内部可见</span>
+              </div>
+              <button id="customerClose" class="mini-button" type="button">收起</button>
+            </div>
+            <div class="customer-grid">
+              <div>
+                <div class="section-label">标签</div>
+                <div id="tagList" class="tag-list"></div>
+                <form id="tagForm" class="tag-form">
+                  <input id="tagInput" maxlength="20" placeholder="输入标签后回车，例如：高意向" autocomplete="off">
+                  <button class="ghost" type="submit">添加</button>
+                </form>
+              </div>
+              <label class="notes-field">
+                内部备注
+                <textarea id="customerNotes" rows="3" maxlength="2000" placeholder="记录客户需求、报价、跟进进度……"></textarea>
+              </label>
+            </div>
+            <div class="customer-actions">
+              <span id="customerDirtyHint" class="muted-hint">修改后记得保存</span>
+              <button id="saveCustomerBtn" class="primary" type="button">保存资料</button>
+            </div>
+          </section>
+
+          <div id="loadMoreWrap" class="load-more-wrap" hidden>
+            <button id="loadMoreBtn" class="ghost" type="button">加载更早消息</button>
+          </div>
+
+          <div id="messageList" class="message-list" aria-live="polite"></div>
+
+          <form id="composer" class="composer">
+            <textarea id="messageInput" rows="1" maxlength="4096" placeholder="输入回复，Enter 发送，Shift + Enter 换行" autocomplete="off"></textarea>
+            <div class="composer-actions">
+              <button id="cannedBtn" class="ghost" type="button">快捷回复</button>
+              <span id="charCount">0 / 4096</span>
+              <button id="sendBtn" class="primary" type="submit">发送</button>
+            </div>
+          </form>
+          <div id="composerHint" class="composer-hint">Enter 发送 · Shift + Enter 换行</div>
+        </section>
+      </main>
+    </div>
+  </section>
+
+  <div id="toast" class="toast" hidden></div>
+
+  <div id="teamModal" class="modal" hidden>
+    <div class="modal-card team-card" role="dialog" aria-modal="true" aria-labelledby="teamTitle">
+      <header class="modal-head">
+        <div>
+          <h3 id="teamTitle">团队与客服</h3>
+          <p>创建客服账号、调整角色或停用账号。</p>
+        </div>
+        <button id="teamClose" class="modal-close" type="button" aria-label="关闭">×</button>
+      </header>
+
+      <div class="team-layout">
+        <div class="team-list-wrap">
+          <div class="section-label">当前成员</div>
+          <div id="teamList" class="team-list"></div>
+        </div>
+
+        <form id="createUserForm" class="team-create">
+          <div class="section-label">新增客服</div>
+          <label>
+            用户名
+            <input id="newUsername" name="username" placeholder="例如 xiaowang" required minlength="3" maxlength="32" pattern="[A-Za-z0-9_.-]+">
+          </label>
+          <label>
+            显示名称
+            <input id="newDisplayName" name="displayName" placeholder="例如 小王" required maxlength="40">
+          </label>
+          <label>
+            初始密码
+            <input id="newPassword" name="password" type="password" placeholder="至少 8 位" required minlength="8">
+          </label>
+          <label>
+            角色
+            <select id="newRole" name="role">
+              <option value="agent">客服</option>
+              <option value="admin">管理员</option>
+            </select>
+          </label>
+          <button class="primary" type="submit">创建账号</button>
+          <div id="createUserError" class="form-error" hidden></div>
+        </form>
+      </div>
+    </div>
+  </div>
+
+  <div id="cannedModal" class="modal" hidden>
+    <div class="modal-card canned-card" role="dialog" aria-modal="true" aria-labelledby="cannedModalTitle">
+      <header class="modal-head">
+        <div>
+          <h3 id="cannedModalTitle">快捷回复</h3>
+          <p>团队共享的常用话术，点击即可插入输入框。</p>
+        </div>
+        <button id="cannedClose" class="modal-close" type="button" aria-label="关闭">×</button>
+      </header>
+
+      <div class="canned-layout">
+        <div class="canned-list-wrap">
+          <div class="section-label">已有回复</div>
+          <div id="cannedList" class="canned-list"></div>
+        </div>
+
+        <form id="cannedForm" class="canned-form">
+          <div id="cannedFormTitle" class="section-label">新增快捷回复</div>
+          <label>
+            标题
+            <input id="cannedTitle" maxlength="40" required placeholder="例如：报价说明">
+          </label>
+          <label>
+            内容
+            <textarea id="cannedContent" rows="5" maxlength="2000" required placeholder="点击插入后可以直接发送给客户……"></textarea>
+          </label>
+          <div class="canned-form-actions">
+            <button id="cannedCancel" class="ghost" type="button" hidden>取消编辑</button>
+            <button class="primary" type="submit">保存</button>
+          </div>
+          <div id="cannedError" class="form-error" hidden></div>
+        </form>
+      </div>
+    </div>
+  </div>
+
+  <div id="passwordModal" class="modal" hidden>
+    <div class="modal-card password-card" role="dialog" aria-modal="true" aria-labelledby="passwordTitle">
+      <header class="modal-head">
+        <div>
+          <h3 id="passwordTitle">修改密码</h3>
+          <p>修改后其他设备上的登录会失效。</p>
+        </div>
+        <button id="passwordClose" class="modal-close" type="button" aria-label="关闭">×</button>
+      </header>
+      <form id="passwordForm" class="password-form">
+        <label>
+          当前密码
+          <input id="currentPassword" type="password" autocomplete="current-password" required>
+        </label>
+        <label>
+          新密码
+          <input id="newPasswordSelf" type="password" autocomplete="new-password" required minlength="8">
+        </label>
+        <label>
+          确认新密码
+          <input id="confirmPassword" type="password" autocomplete="new-password" required minlength="8">
+        </label>
+        <button class="primary" type="submit">保存新密码</button>
+        <div id="passwordError" class="form-error" hidden></div>
+      </form>
+    </div>
+  </div>
+
+  <script src="/app.js"></script>
+</body>
+</html>
