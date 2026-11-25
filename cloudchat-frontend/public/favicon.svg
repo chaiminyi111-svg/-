@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="云聊 CloudChat">
+  <rect width="64" height="64" rx="15" fill="#07c160"/>
+  <path d="M12 20a8 8 0 0 1 8-8h24a8 8 0 0 1 8 8v14a8 8 0 0 1-8 8H31l-11 9v-9.6A8 8 0 0 1 12 34z" fill="#ffffff"/>
+  <path d="M39.5 26.5a7.6 7.6 0 1 0 0 12.2" fill="none" stroke="#07c160" stroke-width="4.2" stroke-linecap="round"/>
+</svg>
