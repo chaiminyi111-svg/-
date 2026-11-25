@@ -73,6 +73,43 @@ class TelegramClient {
     return data.result;
   }
 
+  async requestMultipart(method, formData, options = {}) {
+    if (!this.configured) throw new TelegramError("未配置 Telegram Bot Token", "NOT_CONFIGURED");
+
+    const timeoutMs = options.timeoutMs || 60000;
+    let response;
+    try {
+      response = await fetch(`${this.apiBase}/bot${this.token}/${method}`, {
+        method: "POST",
+        body: formData,
+        signal: AbortSignal.timeout(timeoutMs)
+      });
+    } catch (error) {
+      if (error.name === "AbortError") throw error;
+      throw new TelegramError("无法连接 Telegram API，请检查服务器网络", "NETWORK_ERROR");
+    }
+
+    let data;
+    try {
+      data = await response.json();
+    } catch {
+      throw new TelegramError(`Telegram API 返回异常（HTTP ${response.status}）`, "BAD_RESPONSE");
+    }
+    if (!response.ok || !data.ok) {
+      const description = String(data.description || `HTTP ${response.status}`).slice(0, 300);
+      throw new TelegramError(
+        `Telegram API 错误：${description}`,
+        "API_ERROR",
+        Number(data.parameters?.retry_after || 0)
+      );
+    }
+    return data.result;
+  }
+
+  getMe() {
+    return this.request("getMe", {});
+  }
+
   getUpdates(offset, timeout, signal) {
     return this.request(
       "getUpdates",
@@ -91,6 +128,17 @@ class TelegramClient {
       text,
       link_preview_options: { is_disabled: true }
     });
+  }
+
+  sendMedia(chatId, buffer, fileName, mimeType, caption) {
+    const asPhoto = /^image\/(jpeg|png|webp)$/i.test(mimeType);
+    const method = asPhoto ? "sendPhoto" : "sendDocument";
+    const field = asPhoto ? "photo" : "document";
+    const form = new FormData();
+    form.append("chat_id", String(chatId));
+    form.append(field, new Blob([buffer], { type: mimeType || "application/octet-stream" }), fileName);
+    if (caption) form.append("caption", caption);
+    return this.requestMultipart(method, form);
   }
 
   getFile(fileId) {
@@ -304,10 +352,10 @@ function createTelegramService({ db, config, logger, broadcaster }) {
         const now = nowIso();
         db.prepare(
           `INSERT INTO conversations
-             (telegram_chat_id, chat_type, title, username, status, assignee_id,
+             (telegram_chat_id, channel, chat_type, title, username, status, assignee_id,
               last_message_at, last_message_preview, last_message_direction,
               unread_count, created_at, updated_at)
-           VALUES (?, ?, ?, ?, 'open', NULL, ?, ?, 'in', 0, ?, ?)`
+           VALUES (?, 'telegram', ?, ?, ?, 'open', NULL, ?, ?, 'in', 0, ?, ?)`
         ).run(
           chatId,
           message.chat.type,
@@ -325,7 +373,7 @@ function createTelegramService({ db, config, logger, broadcaster }) {
       } else {
         db.prepare(
           `UPDATE conversations
-           SET chat_type = ?, title = ?, username = ?, updated_at = ?
+           SET channel = 'telegram', chat_type = ?, title = ?, username = ?, updated_at = ?
            WHERE id = ?`
         ).run(message.chat.type, title, username, nowIso(), conversation.id);
       }
@@ -457,6 +505,72 @@ function createTelegramService({ db, config, logger, broadcaster }) {
     return { message, conversation: summary };
   }
 
+  async function sendMedia(conversation, file, user) {
+    if (!client.configured) {
+      throw new TelegramError("未配置 TELEGRAM_BOT_TOKEN，暂时无法发送附件", "NOT_CONFIGURED");
+    }
+
+    const sent = await client.sendMedia(
+      conversation.telegram_chat_id,
+      file.buffer,
+      file.fileName,
+      file.mimeType,
+      file.caption
+    );
+    const isPhoto = Array.isArray(sent.photo) && sent.photo.length > 0;
+    const sentFile = isPhoto ? sent.photo[sent.photo.length - 1] : sent.document;
+    const messageType = isPhoto ? "photo" : "document";
+    const body = file.caption || (isPhoto ? "[图片]" : `[文件] ${file.fileName}`);
+    const createdAt = new Date(
+      Number(sent.date || Math.floor(Date.now() / 1000)) * 1000
+    ).toISOString();
+    const now = nowIso();
+    const meta = {
+      via: "bot",
+      fileId: sentFile?.file_id || null,
+      fileName: file.fileName,
+      mimeType: file.mimeType,
+      fileSize: file.buffer.length,
+      caption: file.caption || ""
+    };
+
+    const messageId = withTransaction(db, () => {
+      const insert = db.prepare(
+        `INSERT INTO messages
+           (conversation_id, telegram_message_id, direction, sender_id, sender_name,
+            body, message_type, meta_json, created_at)
+         VALUES (?, ?, 'out', ?, ?, ?, ?, ?, ?)`
+      ).run(
+        conversation.id,
+        String(sent.message_id),
+        user.id,
+        user.displayName,
+        body,
+        messageType,
+        JSON.stringify(meta),
+        createdAt
+      );
+
+      db.prepare(
+        `UPDATE conversations
+         SET last_message_at = ?,
+             last_message_preview = ?,
+             last_message_direction = 'out',
+             updated_at = ?
+         WHERE id = ?`
+      ).run(createdAt, messagePreview(body), now, conversation.id);
+
+      return Number(insert.lastInsertRowid);
+    });
+
+    const conversationRow = getConversationById(db, conversation.id);
+    const messageRow = db.prepare("SELECT * FROM messages WHERE id = ?").get(messageId);
+    const message = toPublicMessage(messageRow);
+    const summary = toConversationSummary(conversationRow);
+    emit({ type: "message.created", conversation: summary, message });
+    return { message, conversation: summary };
+  }
+
   async function getMedia(messageRow) {
     const meta = safeJsonParse(messageRow.meta_json, {});
     if (!meta.fileId) return null;
@@ -549,6 +663,7 @@ function createTelegramService({ db, config, logger, broadcaster }) {
     stop,
     ingestUpdate,
     sendReply,
+    sendMedia,
     getMedia
   };
 }

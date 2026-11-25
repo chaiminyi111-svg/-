@@ -126,6 +126,7 @@ function toConversationSummary(row) {
   return {
     id: row.id,
     chatId: row.telegram_chat_id,
+    channel: row.channel || "telegram",
     chatType: row.chat_type,
     title: row.title,
     username: row.username || "",

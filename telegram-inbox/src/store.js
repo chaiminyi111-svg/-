@@ -113,6 +113,114 @@ function getMessageById(db, id) {
   return db.prepare("SELECT * FROM messages WHERE id = ?").get(id);
 }
 
+function getStats(db, days = 7) {
+  const rangeDays = Math.min(Math.max(Number.parseInt(days, 10) || 7, 1), 30);
+  const now = new Date();
+  const startDate = new Date(Date.UTC(
+    now.getUTCFullYear(),
+    now.getUTCMonth(),
+    now.getUTCDate() - (rangeDays - 1)
+  ));
+  const startIso = startDate.toISOString();
+  const counts = getConversationCounts(db);
+
+  const messageTotals = db.prepare(
+    `SELECT SUM(CASE WHEN direction = 'in' THEN 1 ELSE 0 END) AS inbound,
+            SUM(CASE WHEN direction = 'out' THEN 1 ELSE 0 END) AS outbound
+     FROM messages WHERE created_at >= ?`
+  ).get(startIso);
+
+  const newConversations = Number(
+    db.prepare("SELECT COUNT(*) AS c FROM conversations WHERE created_at >= ?").get(startIso).c
+  );
+
+  const dailyRows = db.prepare(
+    `SELECT substr(created_at, 1, 10) AS day,
+            SUM(CASE WHEN direction = 'in' THEN 1 ELSE 0 END) AS inbound,
+            SUM(CASE WHEN direction = 'out' THEN 1 ELSE 0 END) AS outbound
+     FROM messages
+     WHERE created_at >= ?
+     GROUP BY day`
+  ).all(startIso);
+  const newRows = db.prepare(
+    `SELECT substr(created_at, 1, 10) AS day, COUNT(*) AS c
+     FROM conversations WHERE created_at >= ? GROUP BY day`
+  ).all(startIso);
+  const dailyMap = new Map();
+  for (const row of dailyRows) {
+    dailyMap.set(row.day, {
+      inbound: Number(row.inbound || 0),
+      outbound: Number(row.outbound || 0),
+      newConversations: 0
+    });
+  }
+  for (const row of newRows) {
+    const item = dailyMap.get(row.day) || { inbound: 0, outbound: 0, newConversations: 0 };
+    item.newConversations = Number(row.c || 0);
+    dailyMap.set(row.day, item);
+  }
+
+  const daily = [];
+  for (let index = 0; index < rangeDays; index++) {
+    const day = new Date(startDate);
+    day.setUTCDate(startDate.getUTCDate() + index);
+    const key = day.toISOString().slice(0, 10);
+    const item = dailyMap.get(key) || { inbound: 0, outbound: 0, newConversations: 0 };
+    daily.push({ date: key, ...item });
+  }
+
+  const outboundByAgent = new Map(
+    db.prepare(
+      `SELECT sender_id, COUNT(*) AS c
+       FROM messages
+       WHERE direction = 'out' AND sender_id IS NOT NULL AND created_at >= ?
+       GROUP BY sender_id`
+    ).all(startIso).map(row => [row.sender_id, Number(row.c || 0)])
+  );
+
+  const agents = db.prepare(
+    `SELECT u.id, u.username, u.display_name, u.role,
+            COUNT(c.id) AS assigned,
+            SUM(CASE WHEN c.status = 'open' THEN 1 ELSE 0 END) AS open,
+            SUM(CASE WHEN c.status = 'pending' THEN 1 ELSE 0 END) AS pending,
+            SUM(CASE WHEN c.status = 'closed' THEN 1 ELSE 0 END) AS closed
+     FROM users u
+     LEFT JOIN conversations c ON c.assignee_id = u.id
+     WHERE u.active = 1
+     GROUP BY u.id
+     ORDER BY assigned DESC, u.display_name ASC`
+  ).all().map(row => ({
+    id: row.id,
+    username: row.username,
+    displayName: row.display_name,
+    role: row.role,
+    assigned: Number(row.assigned || 0),
+    open: Number(row.open || 0),
+    pending: Number(row.pending || 0),
+    closed: Number(row.closed || 0),
+    outbound: outboundByAgent.get(row.id) || 0
+  }));
+
+  return {
+    rangeDays,
+    start: startIso,
+    end: now.toISOString(),
+    totals: {
+      conversations: counts.all,
+      open: counts.open,
+      pending: counts.pending,
+      closed: counts.closed,
+      unassigned: counts.unassigned,
+      messagesIn: Number(messageTotals.inbound || 0),
+      messagesOut: Number(messageTotals.outbound || 0),
+      newConversations,
+      activeAgents: agents.length
+    },
+    daily,
+    agents
+  };
+}
+
 function listCannedReplies(db) {
   const rows = db.prepare(
     `SELECT r.*, u.display_name AS created_by_name
@@ -149,5 +257,6 @@ module.exports = {
   getMessageById,
   getConversationMessagesForExport,
   listCannedReplies,
-  getCannedReplyById
+  getCannedReplyById,
+  getStats
 };

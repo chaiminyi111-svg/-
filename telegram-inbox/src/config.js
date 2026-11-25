@@ -33,6 +33,11 @@ const config = {
   telegramApiBase: (process.env.TELEGRAM_API_BASE || "https://api.telegram.org").replace(/\/+$/, ""),
   telegramPollTimeout: Math.min(Math.max(readInt("TELEGRAM_POLL_TIMEOUT", 25), 5), 50),
   telegramDeleteWebhook: readBool("TELEGRAM_DELETE_WEBHOOK", false),
+  whatsappToken: (process.env.WHATSAPP_TOKEN || "").trim(),
+  whatsappPhoneNumberId: (process.env.WHATSAPP_PHONE_NUMBER_ID || "").trim(),
+  whatsappVerifyToken: (process.env.WHATSAPP_VERIFY_TOKEN || "").trim(),
+  whatsappAppSecret: (process.env.WHATSAPP_APP_SECRET || "").trim(),
+  whatsappApiBase: (process.env.WHATSAPP_API_BASE || "https://graph.facebook.com/v20.0").replace(/\/+$/, ""),
   sessionDays: Math.max(readInt("SESSION_DAYS", 7), 1),
   trustProxy: readBool("TRUST_PROXY", true),
   cookieSecure:

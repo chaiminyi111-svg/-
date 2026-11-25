@@ -3,6 +3,7 @@ const { createLogger } = require("./src/util");
 const { openDatabase, bootstrapAdmin } = require("./src/db");
 const { createBroadcaster } = require("./src/realtime");
 const { createTelegramService } = require("./src/telegram");
+const { createWhatsAppService } = require("./src/whatsapp");
 const { createApp } = require("./src/app");
 
 const logger = createLogger(config.logLevel);
@@ -23,12 +24,14 @@ async function main() {
 
   const broadcaster = createBroadcaster(logger);
   const telegram = createTelegramService({ db, config, logger, broadcaster });
-  const app = createApp({ db, config, telegram, broadcaster, logger });
+  const whatsapp = createWhatsAppService({ db, config, logger, broadcaster });
+  const app = createApp({ db, config, telegram, whatsapp, broadcaster, logger });
 
   const server = app.listen(config.port, config.host, () => {
     logger.info(`Telegram 客服收件箱已启动：http://${config.host}:${config.port}`);
     logger.info(`数据库：${config.dbPath}`);
     logger.info(`Telegram Bot：${telegram.configured ? "已配置" : "未配置（只能查看已有数据）"}`);
+    logger.info(`WhatsApp Cloud API：${whatsapp.configured ? "已配置" : "未配置"}`);
   });
 
   server.on("error", error => {

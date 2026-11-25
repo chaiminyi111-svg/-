@@ -28,6 +28,7 @@ CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions(expires_at);
 CREATE TABLE IF NOT EXISTS conversations (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   telegram_chat_id TEXT NOT NULL UNIQUE,
+  channel TEXT NOT NULL DEFAULT 'telegram',
   chat_type TEXT NOT NULL DEFAULT 'private',
   title TEXT NOT NULL,
   username TEXT,
@@ -104,6 +105,7 @@ function openDatabase(dbPath) {
   db.exec("PRAGMA foreign_keys = ON;");
   db.exec("PRAGMA busy_timeout = 5000;");
   db.exec(SCHEMA);
+  ensureColumn(db, "conversations", "channel", "TEXT NOT NULL DEFAULT 'telegram'");
   ensureColumn(db, "conversations", "notes", "TEXT NOT NULL DEFAULT ''");
   ensureColumn(db, "conversations", "tags_json", "TEXT NOT NULL DEFAULT '[]'");
   return db;

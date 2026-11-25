@@ -23,7 +23,8 @@ const {
   listMessages,
   getMessageById,
   listCannedReplies,
-  getCannedReplyById
+  getCannedReplyById,
+  getStats
 } = require("./store");
 const { nowIso, toPublicUser, toConversationSummary, toCannedReply } = require("./util");
 
@@ -38,7 +39,7 @@ function parseId(value) {
   return Number.isFinite(id) && id > 0 ? id : null;
 }
 
-function createApp({ db, config, telegram, broadcaster, logger }) {
+function createApp({ db, config, telegram, whatsapp, broadcaster, logger }) {
   const app = express();
   app.disable("x-powered-by");
   app.set("trust proxy", config.trustProxy ? 1 : false);
@@ -82,11 +83,17 @@ function createApp({ db, config, telegram, broadcaster, logger }) {
     next();
   });
 
-  app.use(express.json({ limit: "1mb" }));
+  app.use(express.json({
+    limit: "1mb",
+    verify: (req, res, buffer) => {
+      if (req.originalUrl.startsWith("/webhook/whatsapp")) req.rawBody = buffer;
+    }
+  }));
   app.use(attachUser(db));
 
   app.use((req, res, next) => {
     if (["GET", "HEAD", "OPTIONS"].includes(req.method)) return next();
+    if (req.path.startsWith("/webhook/")) return next();
     const origin = req.get("origin");
     if (!origin) return next();
 
@@ -108,9 +115,31 @@ function createApp({ db, config, telegram, broadcaster, logger }) {
       service: "telegram-support-inbox",
       version: VERSION,
       telegramConfigured: Boolean(telegram?.configured),
+      whatsappConfigured: Boolean(whatsapp?.configured),
       now: nowIso()
     });
   });
+
+  app.get("/webhook/whatsapp", (req, res) => {
+    if (!whatsapp?.configured) return jsonError(res, 503, "WhatsApp 渠道未配置");
+    const challenge = whatsapp.verifyWebhook(
+      req.query["hub.mode"],
+      req.query["hub.verify_token"],
+      req.query["hub.challenge"]
+    );
+    if (!challenge) return jsonError(res, 403, "Webhook 校验失败");
+    res.type("text/plain").send(challenge);
+  });
+
+  app.post("/webhook/whatsapp", asyncRoute(async (req, res) => {
+    if (!whatsapp?.configured) return jsonError(res, 503, "WhatsApp 渠道未配置");
+    if (!whatsapp.verifySignature(req.rawBody, req.get("x-hub-signature-256"))) {
+      return jsonError(res, 403, "Webhook 签名校验失败");
+    }
+    const count = whatsapp.ingestWebhook(req.body);
+    logger?.debug(`收到 WhatsApp webhook，处理 ${count} 条消息`);
+    res.json({ received: true });
+  }));
 
   app.post("/api/auth/login", (req, res) => {
     const ip = req.ip || req.socket.remoteAddress || "unknown";
@@ -316,18 +345,78 @@ function createApp({ db, config, telegram, broadcaster, logger }) {
     if (text.length > config.maxMessageLength) {
       return jsonError(res, 400, `消息不能超过 ${config.maxMessageLength} 个字符`);
     }
-    if (!telegram?.configured) {
-      return jsonError(res, 503, "未配置 TELEGRAM_BOT_TOKEN，暂时无法发送消息");
+    const channel = conversation.channel || "telegram";
+    const service = channel === "whatsapp" ? whatsapp : telegram;
+    if (!service?.configured) {
+      return jsonError(res, 503, channel === "whatsapp"
+        ? "未配置 WhatsApp Cloud API 凭据，暂时无法发送消息"
+        : "未配置 TELEGRAM_BOT_TOKEN，暂时无法发送消息");
     }
 
     try {
-      const result = await telegram.sendReply(conversation, text, req.user);
-      audit(db, req.user.id, "message.sent", "conversation", id, JSON.stringify({ length: text.length }));
+      const result = await service.sendReply(conversation, text, req.user);
+      audit(db, req.user.id, "message.sent", "conversation", id, JSON.stringify({
+        channel,
+        length: text.length
+      }));
       res.status(201).json(result);
     } catch (error) {
-      logger?.warn("发送 Telegram 消息失败", error.message);
+      logger?.warn(`发送 ${channel} 消息失败`, error.message);
       const status = error.code === "NOT_CONFIGURED" ? 503 : 502;
       return jsonError(res, status, error.message || "发送消息失败");
+    }
+  }));
+
+  app.post("/api/conversations/:id/media", requireAuth, express.raw({
+    type: "application/octet-stream",
+    limit: "20mb"
+  }), asyncRoute(async (req, res) => {
+    const id = parseId(req.params.id);
+    const conversation = id ? getConversationById(db, id) : null;
+    if (!conversation) return jsonError(res, 404, "会话不存在");
+
+    if ((conversation.channel || "telegram") !== "telegram") {
+      return jsonError(res, 400, "当前渠道暂不支持出站附件");
+    }
+    if (!Buffer.isBuffer(req.body) || !req.body.length) {
+      return jsonError(res, 400, "请选择要发送的文件");
+    }
+    if (req.body.length > 20 * 1024 * 1024) {
+      return jsonError(res, 413, "文件不能超过 20MB");
+    }
+    if (!telegram?.configured) {
+      return jsonError(res, 503, "未配置 TELEGRAM_BOT_TOKEN，暂时无法发送附件");
+    }
+
+    const decode = value => {
+      try {
+        return decodeURIComponent(String(value || ""));
+      } catch {
+        return String(value || "");
+      }
+    };
+    const fileName = (decode(req.get("x-file-name")).trim() || "file").slice(0, 180);
+    const mimeType = (String(req.get("x-file-type") || "application/octet-stream").trim() || "application/octet-stream").slice(0, 120);
+    const caption = decode(req.get("x-caption")).trim();
+    if (caption.length > 1024) return jsonError(res, 400, "附件说明不能超过 1024 个字符");
+
+    try {
+      const result = await telegram.sendMedia(conversation, {
+        buffer: req.body,
+        fileName,
+        mimeType,
+        caption
+      }, req.user);
+      audit(db, req.user.id, "message.media_sent", "conversation", id, JSON.stringify({
+        fileName,
+        mimeType,
+        size: req.body.length
+      }));
+      res.status(201).json(result);
+    } catch (error) {
+      logger?.warn("发送 Telegram 附件失败", error.message);
+      const status = error.code === "NOT_CONFIGURED" ? 503 : 502;
+      return jsonError(res, status, error.message || "发送附件失败");
     }
   }));
 
@@ -420,6 +509,10 @@ function createApp({ db, config, telegram, broadcaster, logger }) {
     res.json({ conversation: summary });
   });
 
+  app.get("/api/stats", requireAuth, (req, res) => {
+    res.json({ stats: getStats(db, req.query.days) });
+  });
+
   app.get("/api/canned-replies", requireAuth, (req, res) => {
     res.json({ items: listCannedReplies(db) });
   });
@@ -495,6 +588,9 @@ function createApp({ db, config, telegram, broadcaster, logger }) {
 
     const conversation = getConversationById(db, message.conversation_id);
     if (!conversation) return jsonError(res, 404, "会话不存在");
+    if ((conversation.channel || "telegram") !== "telegram") {
+      return jsonError(res, 501, "当前渠道暂不支持媒体下载");
+    }
     if (!telegram?.configured) return jsonError(res, 503, "未配置 Telegram Bot Token");
 
     let media;
@@ -561,6 +657,9 @@ function createApp({ db, config, telegram, broadcaster, logger }) {
     if (res.headersSent) return next(error);
     if (error.type === "entity.parse.failed") {
       return jsonError(res, 400, "请求体不是有效 JSON");
+    }
+    if (error.type === "entity.too.large") {
+      return jsonError(res, 413, "文件不能超过 20MB");
     }
     logger?.error("未处理的 API 错误", error.message);
     res.status(500).json({ error: "服务器内部错误" });

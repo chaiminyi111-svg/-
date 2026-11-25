@@ -4,15 +4,18 @@ const http = require("node:http");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
+const crypto = require("node:crypto");
 
 const { openDatabase, bootstrapAdmin } = require("../src/db");
 const { createBroadcaster } = require("../src/realtime");
 const { createTelegramService } = require("../src/telegram");
+const { createWhatsAppService } = require("../src/whatsapp");
 const { createApp } = require("../src/app");
 const { createLogger } = require("../src/util");
 
 function startMockTelegram() {
   const sent = [];
+  const mediaSent = [];
   const server = http.createServer(async (req, res) => {
     let body = "";
     for await (const chunk of req) body += chunk;
@@ -26,6 +29,35 @@ function startMockTelegram() {
         ok: true,
         result: { message_id: 9000 + sent.length, date: Math.floor(Date.now() / 1000) }
       }));
+      return;
+    }
+
+    if (url.pathname === "/botTEST/sendPhoto" || url.pathname === "/botTEST/sendDocument") {
+      mediaSent.push({
+        method: url.pathname.split("/").pop(),
+        contentType: req.headers["content-type"] || "",
+        bodyLength: body.length
+      });
+      res.setHeader("content-type", "application/json");
+      if (url.pathname.endsWith("sendPhoto")) {
+        res.end(JSON.stringify({
+          ok: true,
+          result: {
+            message_id: 9500 + mediaSent.length,
+            date: Math.floor(Date.now() / 1000),
+            photo: [{ file_id: "OUT_PHOTO", width: 100, height: 100 }]
+          }
+        }));
+      } else {
+        res.end(JSON.stringify({
+          ok: true,
+          result: {
+            message_id: 9500 + mediaSent.length,
+            date: Math.floor(Date.now() / 1000),
+            document: { file_id: "OUT_DOC", file_name: "outbound.pdf", mime_type: "application/pdf" }
+          }
+        }));
+      }
       return;
     }
 
@@ -56,8 +88,32 @@ function startMockTelegram() {
       resolve({
         server,
         base: `http://127.0.0.1:${server.address().port}`,
-        sent
+        sent,
+        mediaSent
       });
+    });
+  });
+}
+
+function startMockWhatsApp() {
+  const sent = [];
+  const server = http.createServer(async (req, res) => {
+    let body = "";
+    for await (const chunk of req) body += chunk;
+    const url = new URL(req.url, "http://127.0.0.1");
+    if (req.method === "POST" && url.pathname === "/PHONE/messages") {
+      const payload = JSON.parse(body || "{}");
+      sent.push(payload);
+      res.setHeader("content-type", "application/json");
+      res.end(JSON.stringify({ messages: [{ id: "wamid.OUT_" + sent.length }] }));
+      return;
+    }
+    res.statusCode = 404;
+    res.end("{}");
+  });
+  return new Promise(resolve => {
+    server.listen(0, "127.0.0.1", () => {
+      resolve({ server, base: `http://127.0.0.1:${server.address().port}`, sent });
     });
   });
 }
@@ -287,6 +343,49 @@ test("Telegram support inbox end-to-end API", async t => {
     ));
   });
 
+  await t.test("outbound document and photo are sent and stored", async () => {
+    const documentUpload = await fetch(`${base}/api/conversations/${conversationId}/media`, {
+      method: "POST",
+      headers: {
+        cookie: adminCookie,
+        "content-type": "application/octet-stream",
+        "x-file-name": encodeURIComponent("报价单.pdf"),
+        "x-file-type": "application/pdf",
+        "x-caption": encodeURIComponent("这是报价单")
+      },
+      body: Buffer.from("fake-pdf")
+    });
+    assert.equal(documentUpload.status, 201);
+    const documentData = await documentUpload.json();
+    assert.equal(documentData.message.type, "document");
+    assert.equal(documentData.message.meta.fileName, "报价单.pdf");
+    assert.equal(documentData.message.body, "这是报价单");
+    assert.equal(mock.mediaSent[0].method, "sendDocument");
+    assert.match(mock.mediaSent[0].contentType, /multipart\/form-data/);
+
+    const photoUpload = await fetch(`${base}/api/conversations/${conversationId}/media`, {
+      method: "POST",
+      headers: {
+        cookie: adminCookie,
+        "content-type": "application/octet-stream",
+        "x-file-name": encodeURIComponent("photo.jpg"),
+        "x-file-type": "image/jpeg"
+      },
+      body: Buffer.from("fake-jpg")
+    });
+    assert.equal(photoUpload.status, 201);
+    const photoData = await photoUpload.json();
+    assert.equal(photoData.message.type, "photo");
+    assert.equal(mock.mediaSent[1].method, "sendPhoto");
+
+    const proxied = await fetch(`${base}/api/messages/${photoData.message.id}/media`, {
+      headers: { cookie: adminCookie }
+    });
+    assert.equal(proxied.status, 200);
+    assert.equal(proxied.headers.get("content-type"), "image/jpeg");
+    assert.equal(Buffer.from(await proxied.arrayBuffer()).toString(), "fake-image-bytes");
+  });
+
   await t.test("inbound photo media is proxied with auth", async () => {
     const photo = await telegram.ingestUpdate({
       update_id: 2,
@@ -441,6 +540,20 @@ test("Telegram support inbox end-to-end API", async t => {
     assert.equal(tooLong.response.status, 400);
   });
 
+  await t.test("stats returns range, message totals and agent workload", async () => {
+    const result = await apiRequest(base, "/api/stats?days=7", { cookie: adminCookie });
+    assert.equal(result.response.status, 200);
+    assert.equal(result.data.stats.rangeDays, 7);
+    assert.equal(result.data.stats.daily.length, 7);
+    assert.equal(result.data.stats.totals.conversations, 1);
+    assert.equal(result.data.stats.totals.messagesIn, 2);
+    assert.equal(result.data.stats.totals.messagesOut, 3);
+    assert.equal(result.data.stats.totals.newConversations, 1);
+    const agent = result.data.stats.agents.find(item => item.username === "agent1");
+    assert.ok(agent);
+    assert.equal(agent.outbound, 1);
+  });
+
   await t.test("deactivating an agent releases assigned conversations", async () => {
     const deactivate = await apiRequest(base, `/api/users/${agent2Id}`, {
       method: "PATCH",
@@ -498,4 +611,134 @@ test("Telegram support inbox end-to-end API", async t => {
     });
     assert.equal(demote.response.status, 400);
   });
+});
+
+test("WhatsApp Cloud API adapter", async t => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "wa-inbox-test-"));
+  const mock = await startMockWhatsApp();
+  const config = {
+    root: path.resolve(__dirname, ".."),
+    dataDir: tempDir,
+    dbPath: path.join(tempDir, "test.db"),
+    port: 0,
+    host: "127.0.0.1",
+    nodeEnv: "test",
+    adminUsername: "admin",
+    adminPassword: "wa-admin-pass",
+    adminDisplayName: "管理员",
+    telegramToken: "",
+    telegramApiBase: "http://127.0.0.1:1",
+    telegramPollTimeout: 5,
+    telegramDeleteWebhook: false,
+    whatsappToken: "WA_TEST",
+    whatsappPhoneNumberId: "PHONE",
+    whatsappVerifyToken: "verify-me",
+    whatsappAppSecret: "app-secret",
+    whatsappApiBase: mock.base,
+    sessionDays: 7,
+    trustProxy: false,
+    cookieSecure: false,
+    publicOrigin: "",
+    maxMessageLength: 4096,
+    logLevel: "error"
+  };
+
+  const logger = createLogger("error");
+  const db = openDatabase(config.dbPath);
+  bootstrapAdmin(db, config);
+  const broadcaster = createBroadcaster(logger);
+  const telegram = createTelegramService({ db, config, logger, broadcaster });
+  const whatsapp = createWhatsAppService({ db, config, logger, broadcaster });
+  const app = createApp({ db, config, telegram, whatsapp, broadcaster, logger });
+  const server = await new Promise(resolve => {
+    const instance = app.listen(0, "127.0.0.1", () => resolve(instance));
+  });
+  const base = `http://127.0.0.1:${server.address().port}`;
+
+  t.after(async () => {
+    await new Promise(resolve => server.close(resolve));
+    broadcaster.close();
+    db.close();
+    await new Promise(resolve => mock.server.close(resolve));
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  const health = await apiRequest(base, "/api/health");
+  assert.equal(health.data.whatsappConfigured, true);
+
+  const verify = await apiRequest(
+    base,
+    "/webhook/whatsapp?hub.mode=subscribe&hub.verify_token=verify-me&hub.challenge=challenge-123"
+  );
+  assert.equal(verify.response.status, 200);
+  assert.equal(verify.data.raw, "challenge-123");
+
+  const wrongVerify = await apiRequest(
+    base,
+    "/webhook/whatsapp?hub.mode=subscribe&hub.verify_token=wrong&hub.challenge=x"
+  );
+  assert.equal(wrongVerify.response.status, 403);
+
+  const payload = {
+    object: "whatsapp_business_account",
+    entry: [{
+      changes: [{
+        value: {
+          metadata: { phone_number_id: "PHONE" },
+          contacts: [{ wa_id: "8613800000000", profile: { name: "WA 客户" } }],
+          messages: [{
+            from: "8613800000000",
+            id: "wamid.IN_1",
+            timestamp: String(Math.floor(Date.now() / 1000)),
+            type: "text",
+            text: { body: "你好 WhatsApp" }
+          }]
+        }
+      }]
+    }]
+  };
+  const raw = Buffer.from(JSON.stringify(payload));
+  const signature = "sha256=" + crypto.createHmac("sha256", config.whatsappAppSecret).update(raw).digest("hex");
+  const badWebhook = await fetch(base + "/webhook/whatsapp", {
+    method: "POST",
+    headers: { "content-type": "application/json", "x-hub-signature-256": "sha256=bad" },
+    body: raw
+  });
+  assert.equal(badWebhook.status, 403);
+
+  const webhook = await fetch(base + "/webhook/whatsapp", {
+    method: "POST",
+    headers: { "content-type": "application/json", "x-hub-signature-256": signature },
+    body: raw
+  });
+  assert.equal(webhook.status, 200);
+
+  const adminCookie = await login(base, "admin", "wa-admin-pass");
+  const list = await apiRequest(base, "/api/conversations?scope=all&status=all", { cookie: adminCookie });
+  const conversation = list.data.items.find(item => item.channel === "whatsapp");
+  assert.ok(conversation);
+  assert.equal(conversation.title, "WA 客户");
+  assert.equal(conversation.unreadCount, 1);
+
+  const reply = await apiRequest(base, `/api/conversations/${conversation.id}/messages`, {
+    method: "POST",
+    cookie: adminCookie,
+    body: { text: "收到，马上处理" }
+  });
+  assert.equal(reply.response.status, 201, JSON.stringify(reply.data));
+  assert.equal(reply.data.message.type, "text");
+  assert.equal(mock.sent.length, 1);
+  assert.equal(mock.sent[0].to, "8613800000000");
+  assert.equal(mock.sent[0].text.body, "收到，马上处理");
+
+  const media = await fetch(base + `/api/conversations/${conversation.id}/media`, {
+    method: "POST",
+    headers: {
+      cookie: adminCookie,
+      "content-type": "application/octet-stream",
+      "x-file-name": "test.txt"
+    },
+    body: Buffer.from("hello")
+  });
+  assert.equal(media.status, 400);
 });

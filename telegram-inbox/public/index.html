@@ -5,21 +5,21 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light">
   <meta name="theme-color" content="#229ED9">
-  <title>聚合客服台 · Telegram 统一收件箱</title>
+  <title>聚合客服台 · 统一收件箱</title>
   <link rel="stylesheet" href="/style.css">
 </head>
 <body>
   <section id="loginView" class="login-view">
     <div class="login-card">
       <div class="login-brand">
-        <div class="brand-mark">TG</div>
+        <div class="brand-mark">CS</div>
         <div>
           <strong>聚合客服台</strong>
-          <span>Telegram 统一收件箱</span>
+          <span>Telegram · WhatsApp</span>
         </div>
       </div>
       <h1>登录客服工作台</h1>
-      <p class="login-desc">集中接收 Telegram 消息，分配客服、跟进客户、统一回复。</p>
+      <p class="login-desc">集中接收 Telegram 和 WhatsApp 消息，分配客服、跟进客户、统一回复。</p>
       <form id="loginForm" class="login-form">
         <label>
           用户名
@@ -39,15 +39,16 @@
   <section id="inboxView" class="inbox-view" hidden>
     <header class="topbar">
       <div class="brand">
-        <div class="brand-mark small">TG</div>
+        <div class="brand-mark small">CS</div>
         <div class="brand-text">
           <strong>聚合客服台</strong>
-          <span>Telegram 统一收件箱</span>
+          <span>Telegram · WhatsApp</span>
         </div>
       </div>
       <div class="topbar-right">
         <span id="connectionStatus" class="connection"><i></i><span>连接中</span></span>
         <span id="currentUser" class="current-user"></span>
+        <button id="statsBtn" class="ghost" type="button">数据</button>
         <button id="teamBtn" class="ghost" type="button" hidden>团队</button>
         <button id="passwordBtn" class="ghost" type="button">修改密码</button>
         <button id="logoutBtn" class="ghost" type="button">退出</button>
@@ -91,12 +92,12 @@
 
       <main class="chat">
         <div id="chatEmpty" class="chat-empty">
-          <div class="empty-illustration">TG</div>
+          <div class="empty-illustration">CS</div>
           <h2>选择一个会话开始回复</h2>
-          <p>左侧集中展示 Telegram 私聊与群聊消息。分配客服、标记状态，所有回复都会通过机器人发出。</p>
+          <p>左侧集中展示 Telegram 和 WhatsApp 会话。分配客服、标记状态，回复会通过对应渠道发出。</p>
           <div id="setupHint" class="setup-hint" hidden>
-            <strong>还没有配置 Telegram 机器人</strong>
-            <p>在 <code>.env</code> 中设置 <code>TELEGRAM_BOT_TOKEN</code>，重启服务后即可收发消息。机器人 Token 从 @BotFather 获取。</p>
+            <strong>还没有配置消息渠道</strong>
+            <p>在 <code>.env</code> 中设置 <code>TELEGRAM_BOT_TOKEN</code> 或 <code>WHATSAPP_TOKEN</code> / <code>WHATSAPP_PHONE_NUMBER_ID</code>，重启服务后即可收发消息。</p>
           </div>
         </div>
 
@@ -129,7 +130,7 @@
           </header>
 
           <div id="telegramWarning" class="warning" hidden>
-            未配置 <code>TELEGRAM_BOT_TOKEN</code>，当前只能查看本地数据，无法发送回复。
+            当前渠道未配置凭据，只能查看本地数据，无法发送回复。
           </div>
 
           <section id="customerPanel" class="customer-panel" hidden>
@@ -169,10 +170,12 @@
           <form id="composer" class="composer">
             <textarea id="messageInput" rows="1" maxlength="4096" placeholder="输入回复，Enter 发送，Shift + Enter 换行" autocomplete="off"></textarea>
             <div class="composer-actions">
+              <button id="attachBtn" class="ghost" type="button">附件</button>
               <button id="cannedBtn" class="ghost" type="button">快捷回复</button>
               <span id="charCount">0 / 4096</span>
               <button id="sendBtn" class="primary" type="submit">发送</button>
             </div>
+            <input id="fileInput" type="file" accept="image/*,.pdf,.doc,.docx,.xls,.xlsx,.txt,.csv,.zip" hidden>
           </form>
           <div id="composerHint" class="composer-hint">Enter 发送 · Shift + Enter 换行</div>
         </section>
@@ -222,6 +225,57 @@
           <button class="primary" type="submit">创建账号</button>
           <div id="createUserError" class="form-error" hidden></div>
         </form>
+      </div>
+    </div>
+  </div>
+
+  <div id="statsModal" class="modal" hidden>
+    <div class="modal-card stats-card" role="dialog" aria-modal="true" aria-labelledby="statsTitle">
+      <header class="modal-head">
+        <div>
+          <h3 id="statsTitle">统计看板</h3>
+          <p>会话、消息和客服工作量概览。</p>
+        </div>
+        <div class="stats-head-actions">
+          <select id="statsRange" aria-label="统计范围">
+            <option value="7">最近 7 天</option>
+            <option value="14">最近 14 天</option>
+            <option value="30">最近 30 天</option>
+          </select>
+          <button id="statsClose" class="modal-close" type="button" aria-label="关闭">×</button>
+        </div>
+      </header>
+
+      <div id="statsCards" class="stats-cards"></div>
+
+      <div class="stats-section">
+        <div class="stats-section-head">
+          <div class="section-label">消息趋势</div>
+          <div class="chart-legend">
+            <span><i class="legend-dot in"></i>收到</span>
+            <span><i class="legend-dot out"></i>发出</span>
+          </div>
+        </div>
+        <div id="statsChart" class="stats-chart"></div>
+      </div>
+
+      <div class="stats-section">
+        <div class="section-label">客服工作量</div>
+        <div class="stats-table-wrap">
+          <table class="stats-table">
+            <thead>
+              <tr>
+                <th>客服</th>
+                <th>负责会话</th>
+                <th>待处理</th>
+                <th>跟进中</th>
+                <th>已关闭</th>
+                <th>发出消息</th>
+              </tr>
+            </thead>
+            <tbody id="statsAgentRows"></tbody>
+          </table>
+        </div>
       </div>
     </div>
   </div>

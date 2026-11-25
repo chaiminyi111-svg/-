@@ -16,7 +16,10 @@ const state = {
   editingCannedId: null,
   customerTags: [],
   customerDirty: false,
+  stats: null,
+  statsDays: 7,
   telegramConfigured: false,
+  whatsappConfigured: false,
   eventSource: null,
   sseConnected: false,
   fallbackTimer: null,
@@ -24,6 +27,7 @@ const state = {
   searchTimer: null,
   threadToken: 0,
   sending: false,
+  uploading: false,
   reading: null,
   composing: false,
   expiring: false
@@ -111,6 +115,7 @@ async function boot() {
   try {
     const health = await api("/api/health");
     state.telegramConfigured = Boolean(health.telegramConfigured);
+    state.whatsappConfigured = Boolean(health.whatsappConfigured);
     const data = await api("/api/auth/me");
     state.me = data.user;
     await enterInbox();
@@ -146,13 +151,16 @@ function showLogin() {
   state.conversations = [];
   state.counts = {};
   state.sending = false;
+  state.uploading = false;
   document.body.classList.remove("mobile-chat-open");
   $("#inboxView").hidden = true;
   $("#loginView").hidden = false;
   $("#teamModal").hidden = true;
   $("#passwordModal").hidden = true;
   $("#cannedModal").hidden = true;
+  $("#statsModal").hidden = true;
   $("#customerPanel").hidden = true;
+  state.stats = null;
   state.cannedReplies = [];
   state.editingCannedId = null;
   state.customerTags = [];
@@ -234,9 +242,9 @@ function renderConversationList() {
     $("#listEmpty").hidden = false;
     $("#listEmptyText").textContent = state.filters.q
       ? "没有找到匹配的会话，试试其他关键词。"
-      : state.telegramConfigured
-        ? "在 Telegram 里给机器人发一条消息，就会出现在这里。"
-        : "配置 TELEGRAM_BOT_TOKEN 并重启服务后，Telegram 消息会出现在这里。";
+      : (state.telegramConfigured || state.whatsappConfigured)
+        ? "在 Telegram 或 WhatsApp 里给客户发一条消息，就会出现在这里。"
+        : "配置 TELEGRAM_BOT_TOKEN 或 WHATSAPP_* 并重启服务后，消息会出现在这里。";
     updateDocumentTitle();
     return;
   }
@@ -274,6 +282,11 @@ function renderConversationList() {
 
     const meta = document.createElement("div");
     meta.className = "conversation-meta";
+    const channel = document.createElement("span");
+    channel.className = "channel-chip " + (conversation.channel || "telegram");
+    channel.textContent = conversation.channel === "whatsapp" ? "WA" : "TG";
+    channel.title = channelLabel(conversation.channel);
+    meta.appendChild(channel);
     if (conversation.assigneeName) {
       const assignee = document.createElement("span");
       assignee.className = "assignee-chip";
@@ -320,8 +333,8 @@ function renderConversationList() {
 function updateDocumentTitle() {
   const unread = state.conversations.reduce((sum, item) => sum + Number(item.unreadCount || 0), 0);
   document.title = unread
-    ? `(${unread}) 聚合客服台 · Telegram 收件箱`
-    : "聚合客服台 · Telegram 统一收件箱";
+    ? `(${unread}) 聚合客服台 · 统一收件箱`
+    : "聚合客服台 · 统一收件箱";
 }
 
 function upsertConversation(conversation) {
@@ -507,9 +520,10 @@ function appendMessageContent(bubble, message) {
   const meta = message.meta || {};
   const body = String(message.body || "");
   const mediaUrl = `/api/messages/${encodeURIComponent(message.id)}/media`;
+  const canProxyMedia = (state.active?.channel || "telegram") !== "whatsapp" && state.telegramConfigured;
 
   if (type === "photo") {
-    if (state.telegramConfigured) {
+    if (canProxyMedia) {
       const image = document.createElement("img");
       image.className = "message-media";
       image.loading = "lazy";
@@ -526,7 +540,7 @@ function appendMessageContent(bubble, message) {
   }
 
   if (type === "document") {
-    if (state.telegramConfigured) {
+    if (canProxyMedia) {
       const link = document.createElement("a");
       link.className = "file-link";
       link.href = mediaUrl;
@@ -541,7 +555,7 @@ function appendMessageContent(bubble, message) {
   }
 
   if (type === "voice" || type === "audio") {
-    if (state.telegramConfigured) {
+    if (canProxyMedia) {
       const audio = document.createElement("audio");
       audio.className = "audio-player";
       audio.controls = true;
@@ -556,7 +570,7 @@ function appendMessageContent(bubble, message) {
   }
 
   if (type === "video" || type === "video_note") {
-    if (state.telegramConfigured) {
+    if (canProxyMedia) {
       const video = document.createElement("video");
       video.className = "video-player";
       video.controls = true;
@@ -571,7 +585,7 @@ function appendMessageContent(bubble, message) {
   }
 
   if (type === "sticker") {
-    if (state.telegramConfigured) {
+    if (canProxyMedia) {
       const image = document.createElement("img");
       image.className = "message-media";
       image.loading = "lazy";
@@ -611,9 +625,11 @@ function renderChatHeader() {
 
   $("#chatTitle").textContent = conversation.title || "未命名会话";
   const typeLabel = conversation.chatType === "private" ? "私聊" : "群聊";
+  const displayId = String(conversation.chatId || "").replace(/^wa:/, "");
   $("#chatSubtitle").textContent =
+    channelLabel(conversation.channel) + " · " +
     (conversation.username ? "@" + conversation.username + " · " : "") +
-    typeLabel + " · ID " + conversation.chatId;
+    typeLabel + " · ID " + displayId;
 
   $("#statusSelect").value = conversation.status;
   renderAssigneeOptions(conversation);
@@ -663,18 +679,38 @@ function renderAssigneeOptions(conversation) {
   }
 }
 
+function channelLabel(channel) {
+  if (channel === "whatsapp") return "WhatsApp";
+  return "Telegram";
+}
+
+function activeChannelConfigured() {
+  const channel = state.active?.channel || "telegram";
+  return channel === "whatsapp" ? state.whatsappConfigured : state.telegramConfigured;
+}
+
 function renderTelegramState() {
-  const configured = state.telegramConfigured;
+  const channel = state.active?.channel || "telegram";
+  const configured = activeChannelConfigured();
+  const label = channelLabel(channel);
   $("#telegramWarning").hidden = configured;
   $("#setupHint").hidden = configured;
+  $("#telegramWarning").textContent = channel === "whatsapp"
+    ? "未配置 WHATSAPP_TOKEN / WHATSAPP_PHONE_NUMBER_ID，当前只能查看本地数据，无法发送回复。"
+    : "未配置 TELEGRAM_BOT_TOKEN，当前只能查看本地数据，无法发送回复。";
 
   const input = $("#messageInput");
   const send = $("#sendBtn");
+  const attach = $("#attachBtn");
   input.disabled = !configured;
-  send.disabled = !configured || state.sending;
+  send.disabled = !configured || state.sending || state.uploading;
+  if (attach) {
+    attach.hidden = channel === "whatsapp";
+    attach.disabled = !configured || state.uploading;
+  }
   input.placeholder = configured
     ? "输入回复，Enter 发送，Shift + Enter 换行"
-    : "未配置 TELEGRAM_BOT_TOKEN，暂时无法发送";
+    : `未配置 ${label} 凭据，暂时无法发送`;
 }
 
 async function updateConversation(payload) {
@@ -841,12 +877,13 @@ async function refreshActiveThread() {
 }
 
 async function sendMessage() {
-  if (!state.active || state.sending) return;
+  if (!state.active || state.sending || state.uploading) return;
   const input = $("#messageInput");
   const text = input.value.trim();
   if (!text) return;
-  if (!state.telegramConfigured) {
-    showToast("未配置 TELEGRAM_BOT_TOKEN，无法发送", "error");
+  const channel = state.active.channel || "telegram";
+  if (!activeChannelConfigured()) {
+    showToast(`未配置 ${channelLabel(channel)} 凭据，无法发送`, "error");
     return;
   }
 
@@ -878,8 +915,192 @@ async function sendMessage() {
   } finally {
     state.sending = false;
     button.textContent = "发送";
-    button.disabled = !state.telegramConfigured;
+    button.disabled = !activeChannelConfigured() || state.uploading;
     input.focus();
+  }
+}
+
+async function uploadAttachment(file) {
+  if (!state.active || !file || state.uploading || state.sending) return;
+  if ((state.active.channel || "telegram") !== "telegram") {
+    showToast("当前渠道暂不支持出站附件", "error");
+    return;
+  }
+  if (!state.telegramConfigured) {
+    showToast("未配置 TELEGRAM_BOT_TOKEN，无法发送附件", "error");
+    return;
+  }
+  if (file.size > 20 * 1024 * 1024) {
+    showToast("文件不能超过 20MB", "error");
+    return;
+  }
+  const caption = $("#messageInput").value.trim();
+  if (caption.length > 1024) {
+    showToast("附件说明不能超过 1024 个字符", "error");
+    return;
+  }
+
+  const conversationId = state.active.id;
+  const button = $("#attachBtn");
+  state.uploading = true;
+  button.disabled = true;
+  button.textContent = "上传中…";
+  renderTelegramState();
+
+  try {
+    const response = await fetch(`/api/conversations/${conversationId}/media`, {
+      method: "POST",
+      credentials: "same-origin",
+      headers: {
+        "content-type": "application/octet-stream",
+        "x-file-name": encodeURIComponent(file.name || "file"),
+        "x-file-type": file.type || "application/octet-stream",
+        "x-caption": encodeURIComponent(caption)
+      },
+      body: file
+    });
+    const text = await response.text();
+    let data = {};
+    try {
+      data = text ? JSON.parse(text) : {};
+    } catch {
+      data = { error: text.slice(0, 200) };
+    }
+    if (!response.ok) {
+      if (response.status === 401 && state.me) handleSessionExpired();
+      throw new ApiError(data.error || `上传失败（${response.status}）`, response.status);
+    }
+
+    if (state.activeId === conversationId) {
+      state.active = data.conversation;
+      upsertConversation(data.conversation);
+      upsertMessage(data.message);
+      renderMessages({ scrollToBottom: true });
+      renderChatHeader();
+      renderConversationList();
+    }
+    $("#messageInput").value = "";
+    updateCharCount();
+    autoResize($("#messageInput"));
+    showToast("附件已发送", "success");
+  } catch (error) {
+    showToast(error.message, "error");
+  } finally {
+    state.uploading = false;
+    $("#fileInput").value = "";
+    button.textContent = "附件";
+    renderTelegramState();
+  }
+}
+
+/* ---------- Stats ---------- */
+async function openStatsModal() {
+  $("#statsModal").hidden = false;
+  $("#statsRange").value = String(state.statsDays || 7);
+  await loadStats();
+}
+
+async function loadStats() {
+  const days = Number($("#statsRange").value) || 7;
+  try {
+    const data = await api(`/api/stats?days=${days}`);
+    state.stats = data.stats;
+    state.statsDays = days;
+    renderStats();
+  } catch (error) {
+    showToast(error.message, "error");
+  }
+}
+
+function renderStats() {
+  const stats = state.stats;
+  if (!stats) return;
+  const totals = stats.totals;
+
+  const cards = [
+    ["会话总数", totals.conversations, "全部会话"],
+    ["区间新会话", totals.newConversations, `最近 ${stats.rangeDays} 天`],
+    ["收到消息", totals.messagesIn, "客户发来"],
+    ["发出消息", totals.messagesOut, "客服发出"],
+    ["待处理", totals.open, "需要跟进"],
+    ["跟进中", totals.pending, "正在处理"],
+    ["未分配", totals.unassigned, "等待领取"],
+    ["启用账号", totals.activeAgents, "管理员 + 客服"]
+  ];
+
+  const cardBox = $("#statsCards");
+  cardBox.replaceChildren();
+  for (const [label, value, hint] of cards) {
+    const item = document.createElement("div");
+    item.className = "stats-card-item";
+    const name = document.createElement("span");
+    name.textContent = label;
+    const number = document.createElement("strong");
+    number.textContent = Number(value || 0).toLocaleString("zh-CN");
+    const note = document.createElement("small");
+    note.textContent = hint;
+    item.append(name, number, note);
+    cardBox.appendChild(item);
+  }
+
+  const chart = $("#statsChart");
+  chart.replaceChildren();
+  const max = Math.max(
+    1,
+    ...stats.daily.flatMap(day => [Number(day.inbound || 0), Number(day.outbound || 0)])
+  );
+  for (const day of stats.daily) {
+    const column = document.createElement("div");
+    column.className = "chart-day";
+    column.title = `${day.date}：收到 ${day.inbound}，发出 ${day.outbound}，新会话 ${day.newConversations}`;
+
+    const bars = document.createElement("div");
+    bars.className = "chart-bars";
+    for (const [kind, value] of [["in", day.inbound], ["out", day.outbound]]) {
+      const bar = document.createElement("i");
+      bar.className = `chart-bar ${kind}`;
+      bar.style.height = `${Math.max(2, Math.round((Number(value || 0) / max) * 100))}%`;
+      bars.appendChild(bar);
+    }
+
+    const label = document.createElement("span");
+    label.className = "chart-label";
+    label.textContent = day.date.slice(5).replace("-", "/");
+    column.append(bars, label);
+    chart.appendChild(column);
+  }
+
+  const tbody = $("#statsAgentRows");
+  tbody.replaceChildren();
+  if (!stats.agents.length) {
+    const row = document.createElement("tr");
+    const cell = document.createElement("td");
+    cell.colSpan = 6;
+    cell.className = "stats-empty";
+    cell.textContent = "暂无客服数据";
+    row.appendChild(cell);
+    tbody.appendChild(row);
+  } else {
+    for (const agent of stats.agents) {
+      const row = document.createElement("tr");
+
+      const nameCell = document.createElement("td");
+      nameCell.className = "agent-cell";
+      const name = document.createElement("strong");
+      name.textContent = agent.displayName;
+      const username = document.createElement("span");
+      username.textContent = "@" + agent.username + " · " + (agent.role === "admin" ? "管理员" : "客服");
+      nameCell.append(name, username);
+
+      const values = [agent.assigned, agent.open, agent.pending, agent.closed, agent.outbound];
+      row.appendChild(nameCell);
+      for (const value of values) {
+        const cell = document.createElement("td");
+        cell.textContent = Number(value || 0).toLocaleString("zh-CN");
+        row.appendChild(cell);
+      }
+      tbody.appendChild(row);
+    }
   }
 }
 
@@ -1400,6 +1621,17 @@ function bindEvents() {
   $("#customerNotes").addEventListener("input", markCustomerDirty);
   $("#saveCustomerBtn").addEventListener("click", saveCustomerProfile);
 
+  $("#attachBtn").addEventListener("click", () => {
+    if (!state.telegramConfigured) {
+      showToast("未配置 TELEGRAM_BOT_TOKEN，无法发送附件", "error");
+      return;
+    }
+    $("#fileInput").click();
+  });
+  $("#fileInput").addEventListener("change", event => {
+    const file = event.target.files?.[0];
+    if (file) uploadAttachment(file);
+  });
   $("#cannedBtn").addEventListener("click", openCannedModal);
   $("#cannedClose").addEventListener("click", () => { $("#cannedModal").hidden = true; });
   $("#cannedModal").addEventListener("click", event => {
@@ -1426,6 +1658,13 @@ function bindEvents() {
     event.preventDefault();
     sendMessage();
   });
+
+  $("#statsBtn").addEventListener("click", openStatsModal);
+  $("#statsClose").addEventListener("click", () => { $("#statsModal").hidden = true; });
+  $("#statsModal").addEventListener("click", event => {
+    if (event.target === $("#statsModal")) $("#statsModal").hidden = true;
+  });
+  $("#statsRange").addEventListener("change", loadStats);
 
   $("#teamBtn").addEventListener("click", openTeamModal);
   $("#teamClose").addEventListener("click", () => { $("#teamModal").hidden = true; });
@@ -1503,6 +1742,7 @@ function bindEvents() {
       $("#teamModal").hidden = true;
       $("#passwordModal").hidden = true;
       $("#cannedModal").hidden = true;
+      $("#statsModal").hidden = true;
     }
   });
 
