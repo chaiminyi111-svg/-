@@ -123,11 +123,15 @@
               <div class="chat-title-block">
                 <h2 id="chatTitle">会话</h2>
                 <p id="chatSubtitle"></p>
-                <span id="chatLanguage" class="chat-language" hidden></span>
+                <div class="chat-badges">
+                  <span id="chatLanguage" class="chat-language" hidden></span>
+                  <span id="chatReadState" class="chat-read-state" hidden></span>
+                </div>
               </div>
             </div>
             <div class="chat-actions">
               <button id="customerBtn" class="ghost" type="button">资料</button>
+              <button id="markUnreadBtn" class="ghost" type="button" title="把当前会话标记为未读">标记未读</button>
               <label class="select-label">
                 <span>状态</span>
                 <select id="statusSelect">

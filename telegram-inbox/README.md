@@ -7,8 +7,8 @@
 ## 已实现功能
 
 - Telegram Bot 长轮询收消息，无需公网 webhook
-- WhatsApp Cloud API webhook 收消息，支持文本回复
-- 统一收件箱：私聊、群聊、未读计数、消息预览、渠道标识
+- WhatsApp Cloud API webhook 收消息，支持文本回复；出站消息展示已发送/已送达/已读回执
+- 统一收件箱：私聊、群聊、未读计数、已读/未读状态、手动标记未读、消息预览、渠道标识
 - Google 翻译：自动识别客户语言，外文消息自动翻译为中文；回复时可选择「跟随客户语言」或指定其他语言。支持官方 Cloud Translation API 和非官方 `translate.googleapis.com` 备用通道
 - 客服分配：管理员可分配给任意客服；支持自动分配（当前接待最少/轮询）和每人接待上限
 - 会话可见范围：管理员可查看全部；普通客服只能查看自己名下和未分配的会话，不能查看其他客服的会话
@@ -129,6 +129,7 @@ WHATSAPP_APP_SECRET=Meta应用密钥
 注意：
 
 - 当前 WhatsApp 只支持**文本**收发；入站图片/文件会显示占位文本，出站附件暂未开放。
+- WhatsApp 的送达/已读状态来自 Meta webhook 的 `statuses` 事件；如果客户关闭已读回执，可能只显示已送达。Telegram Bot API 不提供客户已读回执，因此 Telegram 出站消息只显示发送时间。
 - WhatsApp 有 24 小时客服窗口；超过窗口需要用模板消息，本 MVP 暂未实现模板。
 - Webhook 必须可被 Meta 访问，通常需要公网 HTTPS；内网部署需要反向代理或内网穿透。
 - `WHATSAPP_APP_SECRET` 用于校验 `X-Hub-Signature-256`；生产环境必须配置，否则 Webhook 会拒绝请求。
@@ -301,7 +302,7 @@ sqlite3 data/inbox.db ".backup 'data/inbox-backup.db'"
 npm test
 ```
 
-测试会启动 mock Telegram API、mock WhatsApp API 和 mock Google 翻译 API，覆盖登录、收消息、分配权限、客服会话可见范围、SSE 推送过滤、文本回复、出站图片/文件、媒体代理、WhatsApp webhook 验签与回复、管理员渠道凭据保存/清除、Google 翻译识别与出站翻译、自动分配与接待上限、SLA 统计、CSV 导出、快捷回复、客户标签/备注、搜索、CSRF、角色校验和最后管理员保护，不需要真实平台凭据。
+测试会启动 mock Telegram API、mock WhatsApp API 和 mock Google 翻译 API，覆盖登录、收消息、分配权限、客服会话可见范围、SSE 推送过滤、文本回复、出站图片/文件、媒体代理、WhatsApp webhook 验签与回复、管理员渠道凭据保存/清除、Google 翻译识别与出站翻译、已读/未读与 WhatsApp 回执、自动分配与接待上限、SLA 统计、CSV 导出、快捷回复、客户标签/备注、搜索、CSRF、角色校验和最后管理员保护，不需要真实平台凭据。
 
 ## 后续路线
 

@@ -884,6 +884,26 @@ function createApp({ db, config, telegram, whatsapp, broadcaster, logger, transl
     res.json({ ok: true });
   });
 
+  app.post("/api/conversations/:id/unread", requireAuth, (req, res) => {
+    const id = parseId(req.params.id);
+    const conversation = accessibleConversation(req, id);
+    if (!conversation) return jsonError(res, 404, "会话不存在");
+
+    const unreadCount = Math.max(Number(conversation.unread_count || 0), 1);
+    db.prepare("UPDATE conversations SET unread_count = ?, updated_at = ? WHERE id = ?").run(
+      unreadCount,
+      nowIso(),
+      id
+    );
+    broadcaster?.broadcast({
+      type: "conversation.unread",
+      conversationId: id,
+      unreadCount,
+      assigneeId: conversation.assignee_id
+    });
+    res.json({ ok: true, unreadCount });
+  });
+
   app.get("/api/messages/:id/media", requireAuth, asyncRoute(async (req, res) => {
     const id = parseId(req.params.id);
     const message = id ? getMessageById(db, id) : null;

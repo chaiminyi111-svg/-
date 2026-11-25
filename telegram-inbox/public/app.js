@@ -610,6 +610,12 @@ function buildMessageRow(message) {
   const time = document.createElement("div");
   time.className = "message-time";
   time.textContent = messageTime(message.createdAt);
+  if (out && message.deliveryStatus) {
+    const delivery = document.createElement("span");
+    delivery.className = "delivery-status " + message.deliveryStatus;
+    delivery.textContent = deliveryStatusLabel(message.deliveryStatus);
+    time.appendChild(delivery);
+  }
 
   stack.append(bubble, time);
   row.appendChild(stack);
@@ -766,6 +772,15 @@ function renderChatHeader() {
     language.textContent = "";
   }
 
+  const unread = Number(conversation.unreadCount || 0);
+  const readState = $("#chatReadState");
+  readState.hidden = false;
+  readState.className = "chat-read-state " + (unread ? "unread" : "read");
+  readState.textContent = unread ? `未读 ${unread}` : "已读";
+  const markUnreadBtn = $("#markUnreadBtn");
+  markUnreadBtn.disabled = unread > 0;
+  markUnreadBtn.title = unread > 0 ? "当前会话已有未读消息" : "把当前会话标记为未读";
+
   $("#statusSelect").value = conversation.status;
   renderAssigneeOptions(conversation);
   renderReplyLanguageOptions(conversation);
@@ -902,6 +917,29 @@ async function updateConversation(payload) {
   }
 }
 
+async function markConversationUnread() {
+  const id = state.activeId;
+  const conversation = state.conversations.find(item => item.id === id) ||
+    (state.activeId === id ? state.active : null);
+  if (!id || !conversation) return;
+
+  const button = $("#markUnreadBtn");
+  button.disabled = true;
+  try {
+    const data = await api(`/api/conversations/${id}/unread`, { method: "POST" });
+    conversation.unreadCount = data.unreadCount;
+    if (state.activeId === id && state.active) state.active.unreadCount = data.unreadCount;
+    renderConversationList();
+    renderChatHeader();
+    scheduleSidebarStats();
+    showToast("已标记为未读", "success");
+  } catch (error) {
+    showToast(error.message, "error");
+  } finally {
+    button.disabled = Number(conversation.unreadCount || 0) > 0;
+  }
+}
+
 async function markRead(id, options = {}) {
   const conversation = state.conversations.find(item => item.id === id) ||
     (state.activeId === id ? state.active : null);
@@ -912,6 +950,7 @@ async function markRead(id, options = {}) {
     conversation.unreadCount = 0;
     if (state.activeId === id && state.active) state.active.unreadCount = 0;
     renderConversationList();
+    if (state.activeId === id) renderChatHeader();
     scheduleSidebarStats();
   } catch (error) {
     if (!options.silent && error.status !== 401) showToast(error.message, "error");
@@ -1004,6 +1043,14 @@ function handleRealtime(event) {
     return;
   }
 
+  if (event.type === "message.status" && event.message) {
+    if (state.activeId === event.message.conversationId) {
+      upsertMessage(event.message);
+      renderMessages();
+    }
+    return;
+  }
+
   if (event.type === "conversation.created" || event.type === "conversation.updated") {
     renderConversationList();
     if (state.activeId === event.conversation?.id) renderChatHeader();
@@ -1012,11 +1059,13 @@ function handleRealtime(event) {
     return;
   }
 
-  if (event.type === "conversation.read") {
+  if (event.type === "conversation.read" || event.type === "conversation.unread") {
     const conversation = state.conversations.find(item => item.id === event.conversationId);
-    if (conversation) conversation.unreadCount = 0;
-    if (state.activeId === event.conversationId && state.active) state.active.unreadCount = 0;
+    const unread = Number(event.unreadCount || 0);
+    if (conversation) conversation.unreadCount = unread;
+    if (state.activeId === event.conversationId && state.active) state.active.unreadCount = unread;
     renderConversationList();
+    if (state.activeId === event.conversationId) renderChatHeader();
     scheduleSidebarStats();
   }
 }
@@ -2222,6 +2271,10 @@ function statusLabel(status) {
   return { open: "待处理", pending: "跟进中", closed: "已关闭" }[status] || status;
 }
 
+function deliveryStatusLabel(status) {
+  return { sent: "已发送", delivered: "已送达", read: "已读", failed: "发送失败" }[status] || "";
+}
+
 function updateCharCount() {
   const input = $("#messageInput");
   $("#charCount").textContent = `${input.value.length} / 4096`;
@@ -2313,6 +2366,7 @@ function bindEvents() {
 
   $("#loadMoreBtn").addEventListener("click", loadMoreMessages);
 
+  $("#markUnreadBtn").addEventListener("click", markConversationUnread);
   $("#customerBtn").addEventListener("click", () => {
     const panel = $("#customerPanel");
     panel.hidden = !panel.hidden;

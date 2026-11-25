@@ -146,10 +146,11 @@ function getStats(db, days = 7, options = {}) {
     db.prepare("SELECT COUNT(*) AS c FROM conversations WHERE created_at >= ?").get(startIso).c
   );
   const assignedTotals = db.prepare(
-    `SELECT COUNT(*) AS assigned,
-            COALESCE(SUM(unread_count), 0) AS unread
-     FROM conversations WHERE assignee_id IS NOT NULL`
+    "SELECT COUNT(*) AS assigned FROM conversations WHERE assignee_id IS NOT NULL"
   ).get();
+  const totalUnread = Number(
+    db.prepare("SELECT COALESCE(SUM(unread_count), 0) AS unread FROM conversations").get().unread || 0
+  );
   const newAssigned = Number(
     db.prepare(
       `SELECT COUNT(*) AS c FROM conversations
@@ -280,7 +281,7 @@ function getStats(db, days = 7, options = {}) {
       closed: counts.closed,
       unassigned: counts.unassigned,
       assigned: Number(assignedTotals.assigned || 0),
-      unread: Number(assignedTotals.unread || 0),
+      unread: totalUnread,
       messagesIn: Number(messageTotals.inbound || 0),
       messagesOut: Number(messageTotals.outbound || 0),
       newConversations,

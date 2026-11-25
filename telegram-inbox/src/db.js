@@ -74,6 +74,8 @@ CREATE TABLE IF NOT EXISTS messages (
   language TEXT,
   translated_body TEXT,
   translation_language TEXT,
+  delivery_status TEXT,
+  delivery_updated_at TEXT,
   created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_messages_conversation ON messages(conversation_id, created_at);
@@ -123,6 +125,8 @@ function openDatabase(dbPath) {
   ensureColumn(db, "messages", "language", "TEXT");
   ensureColumn(db, "messages", "translated_body", "TEXT");
   ensureColumn(db, "messages", "translation_language", "TEXT");
+  ensureColumn(db, "messages", "delivery_status", "TEXT");
+  ensureColumn(db, "messages", "delivery_updated_at", "TEXT");
   db.exec(`
     UPDATE conversations
     SET assigned_at = COALESCE(last_message_at, created_at, updated_at)

@@ -382,6 +382,27 @@ test("Telegram support inbox end-to-end API", async t => {
       { method: "POST", cookie: adminCookie }
     );
     assert.equal(read.response.status, 200);
+
+    const unread = await apiRequest(
+      base,
+      `/api/conversations/${conversationId}/unread`,
+      { method: "POST", cookie: adminCookie }
+    );
+    assert.equal(unread.response.status, 200);
+    assert.equal(unread.data.unreadCount, 1);
+    const unreadList = await apiRequest(base, "/api/conversations?scope=all&status=all", {
+      cookie: adminCookie
+    });
+    assert.equal(unreadList.data.items[0].unreadCount, 1);
+    const unreadStats = await apiRequest(base, "/api/stats?days=1", { cookie: adminCookie });
+    assert.equal(unreadStats.data.stats.totals.unread, 1);
+
+    const readAgain = await apiRequest(
+      base,
+      `/api/conversations/${conversationId}/read`,
+      { method: "POST", cookie: adminCookie }
+    );
+    assert.equal(readAgain.response.status, 200);
   });
 
   let agent1Cookie;
@@ -1191,9 +1212,47 @@ test("WhatsApp Cloud API adapter", async t => {
   });
   assert.equal(reply.response.status, 201, JSON.stringify(reply.data));
   assert.equal(reply.data.message.type, "text");
+  assert.equal(reply.data.message.deliveryStatus, "sent");
   assert.equal(mock.sent.length, 1);
   assert.equal(mock.sent[0].to, "8613800000000");
   assert.equal(mock.sent[0].text.body, "收到，马上处理");
+
+  const statusPayload = {
+    object: "whatsapp_business_account",
+    entry: [{
+      changes: [{
+        value: {
+          metadata: { phone_number_id: "PHONE" },
+          statuses: [{
+            id: "wamid.OUT_1",
+            status: "read",
+            timestamp: String(Math.floor(Date.now() / 1000)),
+            recipient_id: "8613800000000"
+          }]
+        }
+      }]
+    }]
+  };
+  const statusRaw = Buffer.from(JSON.stringify(statusPayload));
+  const statusSignature = "sha256=" + crypto
+    .createHmac("sha256", config.whatsappAppSecret)
+    .update(statusRaw)
+    .digest("hex");
+  const statusWebhook = await fetch(base + "/webhook/whatsapp", {
+    method: "POST",
+    headers: { "content-type": "application/json", "x-hub-signature-256": statusSignature },
+    body: statusRaw
+  });
+  assert.equal(statusWebhook.status, 200);
+
+  const messages = await apiRequest(
+    base,
+    `/api/conversations/${conversation.id}/messages`,
+    { cookie: adminCookie }
+  );
+  const outbound = messages.data.messages.find(item => item.direction === "out");
+  assert.equal(outbound.deliveryStatus, "read");
+  assert.ok(outbound.deliveryUpdatedAt);
 
   const media = await fetch(base + `/api/conversations/${conversation.id}/media`, {
     method: "POST",

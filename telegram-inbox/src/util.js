@@ -120,6 +120,8 @@ function toPublicMessage(row) {
     language: row.language || null,
     translatedBody: row.translated_body || null,
     translationLanguage: row.translation_language || null,
+    deliveryStatus: row.delivery_status || null,
+    deliveryUpdatedAt: row.delivery_updated_at || null,
     createdAt: row.created_at
   };
 }

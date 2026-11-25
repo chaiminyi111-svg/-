@@ -1748,3 +1748,41 @@ textarea {
 @media (max-width: 700px) {
   .assignment-form { grid-template-columns: 1fr; }
 }
+
+/* ---------- Read state ---------- */
+.chat-badges {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+  margin-top: 4px;
+}
+.chat-badges .chat-language { margin-top: 0; }
+.chat-read-state {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 7px;
+  border: 1px solid #d6e8f2;
+  border-radius: 999px;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: .2px;
+}
+.chat-read-state.read {
+  border-color: #cde9d9;
+  background: #eefaf4;
+  color: #188a59;
+}
+.chat-read-state.unread {
+  border-color: #f2d8bb;
+  background: #fff7ec;
+  color: #b66a15;
+}
+.delivery-status {
+  margin-left: 4px;
+  font-weight: 700;
+}
+.delivery-status.sent { color: #8a9aaa; }
+.delivery-status.delivered { color: #1687b0; }
+.delivery-status.read { color: #188a59; }
+.delivery-status.failed { color: #c0392b; }

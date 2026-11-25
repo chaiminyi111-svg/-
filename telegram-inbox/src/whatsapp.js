@@ -367,6 +367,35 @@ function createWhatsAppService({ db, config, logger, broadcaster, translate }) {
     return { ...result, conversation, message: publicMessage };
   }
 
+  function updateDeliveryStatus(status) {
+    const externalId = "wa:" + String(status?.id || "");
+    const next = String(status?.status || "").toLowerCase();
+    const rank = { sent: 1, delivered: 2, failed: 3, read: 4 };
+    if (!status?.id || !rank[next]) return false;
+
+    const row = db.prepare(
+      "SELECT * FROM messages WHERE telegram_message_id = ? AND direction = 'out'"
+    ).get(externalId);
+    if (!row) return false;
+    if ((rank[row.delivery_status] || 0) >= rank[next]) return false;
+
+    const timestamp = Number(status.timestamp)
+      ? new Date(Number(status.timestamp) * 1000).toISOString()
+      : nowIso();
+    db.prepare(
+      "UPDATE messages SET delivery_status = ?, delivery_updated_at = ? WHERE id = ?"
+    ).run(next, timestamp, row.id);
+
+    const updated = db.prepare("SELECT * FROM messages WHERE id = ?").get(row.id);
+    const conversationRow = getConversationById(db, row.conversation_id);
+    emit({
+      type: "message.status",
+      conversation: toConversationSummary(conversationRow),
+      message: toPublicMessage(updated)
+    });
+    return true;
+  }
+
   async function ingestWebhook(payload) {
     let count = 0;
     for (const entry of Array.isArray(payload?.entry) ? payload.entry : []) {
@@ -389,6 +418,13 @@ function createWhatsAppService({ db, config, logger, broadcaster, translate }) {
             count += 1;
           } catch (error) {
             logger?.error("处理 WhatsApp 消息失败", error.message);
+          }
+        }
+        for (const status of Array.isArray(value.statuses) ? value.statuses : []) {
+          try {
+            if (updateDeliveryStatus(status)) count += 1;
+          } catch (error) {
+            logger?.error("更新 WhatsApp 消息状态失败", error.message);
           }
         }
       }
@@ -414,8 +450,8 @@ function createWhatsAppService({ db, config, logger, broadcaster, translate }) {
       const insert = db.prepare(
         `INSERT INTO messages
            (conversation_id, telegram_message_id, direction, sender_id, sender_name,
-            body, message_type, meta_json, language, created_at)
-         VALUES (?, ?, 'out', ?, ?, ?, 'text', ?, ?, ?)`
+            body, message_type, meta_json, language, delivery_status, delivery_updated_at, created_at)
+         VALUES (?, ?, 'out', ?, ?, ?, 'text', ?, ?, 'sent', ?, ?)`
       ).run(
         conversation.id,
         waMessageId,
@@ -424,6 +460,7 @@ function createWhatsAppService({ db, config, logger, broadcaster, translate }) {
         outboundText,
         JSON.stringify({ via: "whatsapp", ...prepared.meta }),
         prepared.language || null,
+        now,
         createdAt
       );
 
