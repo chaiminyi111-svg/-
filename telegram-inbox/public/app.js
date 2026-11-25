@@ -134,12 +134,22 @@ async function enterInbox() {
   startFallbackPolling();
 }
 
+function applyRoleScope() {
+  const isAdmin = state.me?.role === "admin";
+  const allTab = document.querySelector('.scope-tab[data-scope="all"]');
+  if (allTab) allTab.hidden = !isAdmin;
+  document.querySelector(".scope-tabs")?.classList.toggle("agent", !isAdmin);
+  if (!isAdmin && state.filters.scope === "all") state.filters.scope = "mine";
+  $$(".scope-tab").forEach(tab => tab.classList.toggle("active", tab.dataset.scope === state.filters.scope));
+}
+
 function showInbox() {
   $("#loginView").hidden = true;
   $("#inboxView").hidden = false;
   $("#currentUser").textContent = `${state.me.displayName} · ${state.me.role === "admin" ? "管理员" : "客服"}`;
   $("#channelsBtn").hidden = state.me.role !== "admin";
   $("#teamBtn").hidden = state.me.role !== "admin";
+  applyRoleScope();
   renderTelegramState();
 }
 
@@ -152,6 +162,7 @@ function showLogin() {
   state.messages = [];
   state.conversations = [];
   state.counts = {};
+  state.filters = { scope: "all", status: "open", q: "" };
   state.sending = false;
   state.uploading = false;
   document.body.classList.remove("mobile-chat-open");
@@ -201,6 +212,14 @@ async function loadConversations(options = {}) {
       if (active) {
         state.active = active;
         renderChatHeader();
+      } else {
+        state.threadToken += 1;
+        state.activeId = null;
+        state.active = null;
+        state.messages = [];
+        document.body.classList.remove("mobile-chat-open");
+        renderChatHeader();
+        renderMessages();
       }
     }
     if (!state.activeId && data.items.length && window.innerWidth > 760) {
@@ -801,6 +820,21 @@ function stopFallbackPolling() {
 
 function handleRealtime(event) {
   if (!event || !event.type) return;
+
+  if (event.type === "conversation.removed") {
+    state.conversations = state.conversations.filter(item => item.id !== event.conversationId);
+    if (state.activeId === event.conversationId) {
+      state.threadToken += 1;
+      state.activeId = null;
+      state.active = null;
+      state.messages = [];
+      document.body.classList.remove("mobile-chat-open");
+      renderChatHeader();
+      renderMessages();
+    }
+    renderConversationList();
+    return;
+  }
 
   if (event.conversation) {
     upsertConversation(event.conversation);
@@ -1678,6 +1712,7 @@ async function updateTeamUser(id, payload) {
         $("#channelsModal").hidden = true;
         $("#teamModal").hidden = true;
       }
+      applyRoleScope();
     }
     showToast("成员已更新", "success");
     await Promise.all([loadUsers(), loadTeamUsers()]);

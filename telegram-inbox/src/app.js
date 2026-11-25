@@ -66,6 +66,16 @@ function createApp({ db, config, telegram, whatsapp, broadcaster, logger }) {
     return res.status(status).json({ error: message });
   }
 
+  function accessibleConversation(req, id) {
+    const conversation = id ? getConversationById(db, id) : null;
+    if (!conversation) return null;
+    if (req.user.role === "admin") return conversation;
+    if (conversation.assignee_id === null || conversation.assignee_id === req.user.id) {
+      return conversation;
+    }
+    return null;
+  }
+
   app.use((req, res, next) => {
     res.setHeader("X-Content-Type-Options", "nosniff");
     res.setHeader("X-Frame-Options", "DENY");
@@ -455,10 +465,14 @@ function createApp({ db, config, telegram, whatsapp, broadcaster, logger }) {
       status: req.query.status,
       q: req.query.q,
       userId: req.user.id,
+      isAdmin: req.user.role === "admin",
       limit: req.query.limit,
       offset: req.query.offset
     });
-    const counts = getConversationCounts(db);
+    const counts = getConversationCounts(db, {
+      userId: req.user.id,
+      isAdmin: req.user.role === "admin"
+    });
     counts.mine = Number(
       db.prepare("SELECT COUNT(*) AS c FROM conversations WHERE assignee_id = ?").get(req.user.id).c
     );
@@ -467,14 +481,14 @@ function createApp({ db, config, telegram, whatsapp, broadcaster, logger }) {
 
   app.get("/api/conversations/:id", requireAuth, (req, res) => {
     const id = parseId(req.params.id);
-    const conversation = id ? getConversationById(db, id) : null;
+    const conversation = accessibleConversation(req, id);
     if (!conversation) return jsonError(res, 404, "会话不存在");
     res.json({ conversation: toConversationSummary(conversation) });
   });
 
   app.get("/api/conversations/:id/messages", requireAuth, (req, res) => {
     const id = parseId(req.params.id);
-    const conversation = id ? getConversationById(db, id) : null;
+    const conversation = accessibleConversation(req, id);
     if (!conversation) return jsonError(res, 404, "会话不存在");
 
     const result = listMessages(db, id, {
@@ -486,7 +500,7 @@ function createApp({ db, config, telegram, whatsapp, broadcaster, logger }) {
 
   app.post("/api/conversations/:id/messages", requireAuth, asyncRoute(async (req, res) => {
     const id = parseId(req.params.id);
-    const conversation = id ? getConversationById(db, id) : null;
+    const conversation = accessibleConversation(req, id);
     if (!conversation) return jsonError(res, 404, "会话不存在");
 
     const text = String(req.body?.text || "").trim();
@@ -521,7 +535,7 @@ function createApp({ db, config, telegram, whatsapp, broadcaster, logger }) {
     limit: "20mb"
   }), asyncRoute(async (req, res) => {
     const id = parseId(req.params.id);
-    const conversation = id ? getConversationById(db, id) : null;
+    const conversation = accessibleConversation(req, id);
     if (!conversation) return jsonError(res, 404, "会话不存在");
 
     if ((conversation.channel || "telegram") !== "telegram") {
@@ -571,8 +585,9 @@ function createApp({ db, config, telegram, whatsapp, broadcaster, logger }) {
 
   app.patch("/api/conversations/:id", requireAuth, (req, res) => {
     const id = parseId(req.params.id);
-    const conversation = id ? getConversationById(db, id) : null;
+    const conversation = accessibleConversation(req, id);
     if (!conversation) return jsonError(res, 404, "会话不存在");
+    const previousAssigneeId = conversation.assignee_id;
 
     const body = req.body || {};
     const hasAssignee = Object.prototype.hasOwnProperty.call(body, "assigneeId");
@@ -655,6 +670,9 @@ function createApp({ db, config, telegram, whatsapp, broadcaster, logger }) {
 
     const summary = toConversationSummary(getConversationById(db, id));
     broadcaster?.broadcast({ type: "conversation.updated", conversation: summary });
+    if (summary.assigneeId !== null && previousAssigneeId !== summary.assigneeId) {
+      broadcaster?.broadcastToAgents?.({ type: "conversation.removed", conversationId: id }, summary.assigneeId);
+    }
     res.json({ conversation: summary });
   });
 
@@ -719,14 +737,19 @@ function createApp({ db, config, telegram, whatsapp, broadcaster, logger }) {
 
   app.post("/api/conversations/:id/read", requireAuth, (req, res) => {
     const id = parseId(req.params.id);
-    const conversation = id ? getConversationById(db, id) : null;
+    const conversation = accessibleConversation(req, id);
     if (!conversation) return jsonError(res, 404, "会话不存在");
 
     db.prepare("UPDATE conversations SET unread_count = 0, updated_at = ? WHERE id = ?").run(
       nowIso(),
       id
     );
-    broadcaster?.broadcast({ type: "conversation.read", conversationId: id, unreadCount: 0 });
+    broadcaster?.broadcast({
+      type: "conversation.read",
+      conversationId: id,
+      unreadCount: 0,
+      assigneeId: conversation.assignee_id
+    });
     res.json({ ok: true });
   });
 
@@ -735,7 +758,7 @@ function createApp({ db, config, telegram, whatsapp, broadcaster, logger }) {
     const message = id ? getMessageById(db, id) : null;
     if (!message) return jsonError(res, 404, "消息不存在");
 
-    const conversation = getConversationById(db, message.conversation_id);
+    const conversation = accessibleConversation(req, message.conversation_id);
     if (!conversation) return jsonError(res, 404, "会话不存在");
     if ((conversation.channel || "telegram") !== "telegram") {
       return jsonError(res, 501, "当前渠道暂不支持媒体下载");
@@ -778,7 +801,7 @@ function createApp({ db, config, telegram, whatsapp, broadcaster, logger }) {
       "X-Accel-Buffering": "no"
     });
     res.write("retry: 3000\n\n");
-    broadcaster.add(res);
+    broadcaster.add(res, req.user);
 
     req.on("close", () => {
       broadcaster.remove(res);

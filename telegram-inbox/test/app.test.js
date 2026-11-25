@@ -230,9 +230,9 @@ test("Telegram support inbox end-to-end API", async t => {
   const broadcastEvents = [];
   const broadcaster = createBroadcaster(logger);
   const broadcast = broadcaster.broadcast.bind(broadcaster);
-  broadcaster.broadcast = event => {
+  broadcaster.broadcast = (event, targetUserId = null) => {
     broadcastEvents.push(event);
-    broadcast(event);
+    broadcast(event, targetUserId);
   };
   const telegram = createTelegramService({ db, config, logger, broadcaster });
   const app = createApp({ db, config, telegram, broadcaster, logger });
@@ -341,7 +341,7 @@ test("Telegram support inbox end-to-end API", async t => {
     agent1Cookie = await login(base, "agent1", "agent-pass-1");
   });
 
-  await t.test("assignment permissions are enforced", async () => {
+  await t.test("assignment permissions and visibility are enforced", async () => {
     const me = await apiRequest(base, "/api/auth/me", { cookie: agent1Cookie });
     assert.equal(me.response.status, 200);
 
@@ -367,6 +367,45 @@ test("Telegram support inbox end-to-end API", async t => {
     });
     assert.equal(adminAssign.response.status, 200);
     assert.equal(adminAssign.data.conversation.assigneeId, agent2Id);
+
+    const hiddenList = await apiRequest(base, "/api/conversations?scope=all&status=all", {
+      cookie: agent1Cookie
+    });
+    assert.equal(hiddenList.response.status, 200);
+    assert.equal(hiddenList.data.total, 0);
+    assert.equal(hiddenList.data.items.length, 0);
+    assert.equal(hiddenList.data.counts.all, 0);
+
+    for (const [method, path] of [
+      ["GET", `/api/conversations/${conversationId}`],
+      ["GET", `/api/conversations/${conversationId}/messages`],
+      ["POST", `/api/conversations/${conversationId}/messages`],
+      ["POST", `/api/conversations/${conversationId}/read`],
+      ["PATCH", `/api/conversations/${conversationId}`]
+    ]) {
+      const body = method === "POST" && path.endsWith("/messages")
+        ? { text: "不应该发送成功" }
+        : method === "PATCH" ? { status: "closed" } : undefined;
+      const denied = await apiRequest(base, path, { method, cookie: agent1Cookie, body });
+      assert.equal(denied.response.status, 404, `${method} ${path}`);
+    }
+
+    const agent2Cookie = await login(base, "agent2", "agent-pass-2");
+    const agent2List = await apiRequest(base, "/api/conversations?scope=all&status=all", {
+      cookie: agent2Cookie
+    });
+    assert.equal(agent2List.response.status, 200);
+    assert.equal(agent2List.data.total, 1);
+    assert.equal(agent2List.data.items[0].assigneeId, agent2Id);
+    assert.equal(agent2List.data.counts.mine, 1);
+
+    const reassign = await apiRequest(base, `/api/conversations/${conversationId}`, {
+      method: "PATCH",
+      cookie: adminCookie,
+      body: { assigneeId: me.data.user.id }
+    });
+    assert.equal(reassign.response.status, 200);
+    assert.equal(reassign.data.conversation.assigneeId, me.data.user.id);
   });
 
   await t.test("agent can reply through Telegram API", async () => {
@@ -598,6 +637,13 @@ test("Telegram support inbox end-to-end API", async t => {
   });
 
   await t.test("deactivating an agent releases assigned conversations", async () => {
+    const assign = await apiRequest(base, `/api/conversations/${conversationId}`, {
+      method: "PATCH",
+      cookie: adminCookie,
+      body: { assigneeId: agent2Id }
+    });
+    assert.equal(assign.response.status, 200);
+
     const deactivate = await apiRequest(base, `/api/users/${agent2Id}`, {
       method: "PATCH",
       cookie: adminCookie,
@@ -610,6 +656,30 @@ test("Telegram support inbox end-to-end API", async t => {
     });
     assert.equal(conversation.response.status, 200);
     assert.equal(conversation.data.conversation.assigneeId, null);
+  });
+
+  await t.test("agents can see and claim unassigned conversations", async () => {
+    const list = await apiRequest(base, "/api/conversations?scope=all&status=all", {
+      cookie: agent1Cookie
+    });
+    assert.equal(list.response.status, 200);
+    assert.equal(list.data.total, 1);
+    assert.equal(list.data.counts.unassigned, 1);
+    assert.equal(list.data.items[0].assigneeId, null);
+
+    const detail = await apiRequest(base, `/api/conversations/${conversationId}`, {
+      cookie: agent1Cookie
+    });
+    assert.equal(detail.response.status, 200);
+
+    const me = await apiRequest(base, "/api/auth/me", { cookie: agent1Cookie });
+    const claim = await apiRequest(base, `/api/conversations/${conversationId}`, {
+      method: "PATCH",
+      cookie: agent1Cookie,
+      body: { assigneeId: me.data.user.id }
+    });
+    assert.equal(claim.response.status, 200);
+    assert.equal(claim.data.conversation.assigneeId, me.data.user.id);
   });
 
   await t.test("auth, CSRF and role checks", async () => {
@@ -711,6 +781,55 @@ test("Telegram support inbox end-to-end API", async t => {
     assert.equal(restored.data.telegram.configured, true);
     assert.equal(telegram.configured, true);
   });
+});
+
+test("broadcaster filters events by conversation assignee", () => {
+  const logger = createLogger("error");
+  const broadcaster = createBroadcaster(logger);
+  const received = { admin: [], agent1: [], agent2: [] };
+  const client = name => ({
+    write(payload) { received[name].push(payload); },
+    end() {}
+  });
+  const admin = client("admin");
+  const agent1 = client("agent1");
+  const agent2 = client("agent2");
+  broadcaster.add(admin, { id: 1, role: "admin" });
+  broadcaster.add(agent1, { id: 2, role: "agent" });
+  broadcaster.add(agent2, { id: 3, role: "agent" });
+
+  broadcaster.broadcast({
+    type: "message.created",
+    conversation: { id: 10, assigneeId: 2 },
+    message: { id: 20 }
+  });
+  assert.equal(received.admin.length, 1);
+  assert.equal(received.agent1.length, 1);
+  assert.equal(received.agent2.length, 0);
+
+  for (const key of Object.keys(received)) received[key].length = 0;
+  broadcaster.broadcast({
+    type: "message.created",
+    conversation: { id: 10, assigneeId: null },
+    message: { id: 21 }
+  });
+  assert.equal(received.admin.length, 1);
+  assert.equal(received.agent1.length, 1);
+  assert.equal(received.agent2.length, 1);
+
+  for (const key of Object.keys(received)) received[key].length = 0;
+  broadcaster.broadcastToAgents({ type: "conversation.removed", conversationId: 10 }, 3);
+  assert.equal(received.admin.length, 0);
+  assert.equal(received.agent1.length, 1);
+  assert.equal(received.agent2.length, 0);
+
+  for (const key of Object.keys(received)) received[key].length = 0;
+  broadcaster.broadcast({ type: "conversation.removed", conversationId: 10 }, 3);
+  assert.equal(received.admin.length, 0);
+  assert.equal(received.agent1.length, 0);
+  assert.equal(received.agent2.length, 1);
+
+  broadcaster.close();
 });
 
 test("WhatsApp Cloud API adapter", async t => {

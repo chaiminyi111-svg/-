@@ -10,6 +10,7 @@
 - WhatsApp Cloud API webhook 收消息，支持文本回复
 - 统一收件箱：私聊、群聊、未读计数、消息预览、渠道标识
 - 客服分配：管理员可分配给任意客服，普通客服可领取/取消分配
+- 会话可见范围：管理员可查看全部；普通客服只能查看自己名下和未分配的会话，不能查看其他客服的会话
 - 会话状态：待处理、跟进中、已关闭
 - 文本回复：通过 Telegram Bot API / WhatsApp Cloud API 发送并落库
 - 出站附件：支持发送图片和文件（最大 20MB），附件说明作为 caption
@@ -276,7 +277,7 @@ sqlite3 data/inbox.db ".backup 'data/inbox-backup.db'"
 npm test
 ```
 
-测试会启动 mock Telegram API 和 mock WhatsApp API，覆盖登录、收消息、分配权限、文本回复、出站图片/文件、媒体代理、WhatsApp webhook 验签与回复、管理员渠道凭据保存/清除、快捷回复、客户标签/备注、统计、搜索、CSRF、角色校验和最后管理员保护，不需要真实平台凭据。
+测试会启动 mock Telegram API 和 mock WhatsApp API，覆盖登录、收消息、分配权限、客服会话可见范围、SSE 推送过滤、文本回复、出站图片/文件、媒体代理、WhatsApp webhook 验签与回复、管理员渠道凭据保存/清除、快捷回复、客户标签/备注、统计、搜索、CSRF、角色校验和最后管理员保护，不需要真实平台凭据。
 
 ## 后续路线
 

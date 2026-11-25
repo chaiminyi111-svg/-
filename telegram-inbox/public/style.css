@@ -321,6 +321,10 @@ textarea {
   border-radius: 10px;
 }
 
+.scope-tabs.agent {
+  grid-template-columns: repeat(2, 1fr);
+}
+
 .scope-tab {
   border: none;
   background: transparent;

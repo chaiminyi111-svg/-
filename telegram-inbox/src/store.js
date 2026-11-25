@@ -28,6 +28,11 @@ function listConversations(db, options) {
   const where = [];
   const params = [];
 
+  if (options.isAdmin === false) {
+    where.push("(c.assignee_id = ? OR c.assignee_id IS NULL)");
+    params.push(options.userId);
+  }
+
   if (scope === "mine") {
     where.push("c.assignee_id = ?");
     params.push(options.userId);
@@ -67,15 +72,17 @@ function listConversations(db, options) {
   };
 }
 
-function getConversationCounts(db) {
+function getConversationCounts(db, options = {}) {
+  const where = options.isAdmin === false ? " WHERE (assignee_id = ? OR assignee_id IS NULL)" : "";
+  const params = options.isAdmin === false ? [options.userId] : [];
   const row = db.prepare(
     `SELECT COUNT(*) AS total,
             SUM(CASE WHEN assignee_id IS NULL THEN 1 ELSE 0 END) AS unassigned,
             SUM(CASE WHEN status = 'open' THEN 1 ELSE 0 END) AS open,
             SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) AS pending,
             SUM(CASE WHEN status = 'closed' THEN 1 ELSE 0 END) AS closed
-     FROM conversations`
-  ).get();
+     FROM conversations${where}`
+  ).get(...params);
 
   return {
     all: Number(row.total || 0),
