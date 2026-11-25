@@ -25,6 +25,9 @@ let contactsRefreshTimer = null;
 let contactsLoading = false;
 let messageRefreshTimer = null;
 let messagesLoading = false;
+const messageCache = new Map();
+let messageCacheConversation = null;
+let replyTarget = null;
 let conversationOpenSequence = 0;
 let presenceRefreshTimer = null;
 let typingStopTimer = null;
@@ -803,6 +806,7 @@ async function openDirect(contact) {
     const conversationId = d.id;
     activeConversation = conversationId;
     activeConversationType = "direct";
+  clearReplyTarget();
   connectSocket();
   $("#messageInput").value = conversationDrafts.get(String(activeConversation)) || "";
 
@@ -877,6 +881,7 @@ async function openGroup(conv) {
 
   activeConversation = conversationId;
   activeConversationType = "group";
+  clearReplyTarget();
   connectSocket();
   $("#messageInput").value = conversationDrafts.get(String(activeConversation)) || "";
   $("#messages").innerHTML = "";
@@ -942,6 +947,11 @@ async function loadMessages() {
   if (!activeConversation) return;
 
   const conversationId = activeConversation;
+  if (messageCacheConversation !== conversationId) {
+    messageCache.clear();
+    messageCacheConversation = conversationId;
+    clearReplyTarget();
+  }
   const loadToken = ++messageLoadSequence;
   messagesLoading = true;
 
@@ -2040,10 +2050,65 @@ setComposerInputMode("text");
 
 // CLOUDCHAT_COMPOSER_PLUS_MENU_V1
 installRedEnvelopeButton();
+function messageExcerpt(m) {
+  if (!m) return "消息不可见";
+  if (m.recalled_at) return "消息已撤回";
+  const type = m.message_type || "text";
+  if (type === "image") return "[图片]";
+  if (type === "voice") return "[语音]";
+  if (type === "file") return "[文件] " + (m.image_file_name || m.file_name || "");
+  if (type === "red_envelope") return "[红包]";
+  return String(m.body || "").replace(/\s+/g, " ").slice(0, 60);
+}
+
+function ensureReplyBar() {
+  if ($("#replyBar")) return;
+  const bar = document.createElement("div");
+  bar.id = "replyBar";
+  bar.className = "reply-bar";
+  bar.hidden = true;
+
+  const text = document.createElement("span");
+  text.id = "replyBarText";
+
+  const cancel = document.createElement("button");
+  cancel.type = "button";
+  cancel.id = "replyBarCancel";
+  cancel.textContent = "×";
+  cancel.setAttribute("aria-label", "取消回复");
+  cancel.addEventListener("click", clearReplyTarget);
+
+  bar.append(text, cancel);
+  const form = $("#sendForm");
+  form.parentNode.insertBefore(bar, form);
+}
+
+function setReplyTarget(m) {
+  if (!m || !m.id) return;
+  replyTarget = m;
+  ensureReplyBar();
+  const name = m.sender_id === me.id ? "我" : (m.sender_display_name || m.sender_name || "对方");
+  $("#replyBarText").textContent = "回复 " + name + "：" + messageExcerpt(m);
+  $("#replyBar").hidden = false;
+  const messages = $("#messages");
+  if (messages) messages.scrollTop = messages.scrollHeight;
+  $("#messageInput").focus();
+}
+
+function clearReplyTarget() {
+  replyTarget = null;
+  const bar = $("#replyBar");
+  if (bar) bar.hidden = true;
+  const text = $("#replyBarText");
+  if (text) text.textContent = "";
+}
+
 function renderMessage(m, pendingBody) {
   const el = document.createElement("div");
   const mine = m.sender_id === me.id;
   const recalled = Boolean(m.recalled_at);
+
+  if (m.id) messageCache.set(String(m.id), m);
 
   el.className = "bubble" + (mine ? " mine" : "") + (recalled ? " recalled" : "");
   if (m.id) el.dataset.messageId = m.id;
@@ -2106,6 +2171,25 @@ function renderMessage(m, pendingBody) {
       forwardedLabel.style.opacity = "0.7";
       forwardedLabel.style.marginBottom = "5px";
       el.appendChild(forwardedLabel);
+    }
+
+    if (m.reply_to) {
+      const quoted = messageCache.get(String(m.reply_to));
+      const quote = document.createElement("div");
+      quote.className = "reply-quote";
+      quote.dataset.replyTo = String(m.reply_to);
+      const quotedName = quoted
+        ? (quoted.sender_id === me.id ? "我" : (quoted.sender_display_name || quoted.sender_name || "对方"))
+        : "";
+      const quotedText = quoted ? messageExcerpt(quoted) : "引用的消息不可见";
+      quote.textContent = quotedName ? quotedName + "：" + quotedText : quotedText;
+      quote.addEventListener("click", () => {
+        const target = document.querySelector(
+          '[data-message-id="' + String(m.reply_to).replace(/"/g, '\\"') + '"]'
+        );
+        if (target) target.scrollIntoView({ behavior: "smooth", block: "center" });
+      });
+      el.appendChild(quote);
     }
 
     if (m.message_type === "red_envelope") {
@@ -2253,6 +2337,13 @@ function renderMessage(m, pendingBody) {
   }
 
   if (!recalled && m.id && ["text","image","file","voice"].includes(m.message_type || "text")) {
+    const replyButton = document.createElement("button");
+    replyButton.type = "button";
+    replyButton.className = "message-reply-button";
+    replyButton.textContent = "回复";
+    replyButton.addEventListener("click", () => setReplyTarget(m));
+    el.appendChild(replyButton);
+
     const forwardButton = document.createElement("button");
     forwardButton.type = "button";
     forwardButton.className = "message-forward-button";
@@ -2314,7 +2405,7 @@ function renderMessage(m, pendingBody) {
   return el;
 }
 
-function renderPendingMessage(body) {
+function renderPendingMessage(body, replyTo) {
   if (!activeConversation || !me) return null;
   return renderMessage({
     id: "",
@@ -2322,7 +2413,8 @@ function renderPendingMessage(body) {
     body,
     created_at: new Date().toISOString(),
     sender_display_name: me.displayName || "",
-    message_type: "text"
+    message_type: "text",
+    reply_to: replyTo || null
   }, body);
 }
 
@@ -2336,6 +2428,9 @@ function clearPendingMessage(body) {
 
 function updateRecalledMessage(messageId) {
   if (!activeConversation || !messageId) return;
+
+  const cached = messageCache.get(String(messageId));
+  if (cached) cached.recalled_at = new Date().toISOString();
 
   const container = $("#messages");
   if (!container) return;
@@ -2553,6 +2648,7 @@ function connectSocket() {
       image_mime_type: d.message.mimeType || "",
       duration_ms: d.message.durationMs || 0,
       forwarded_from: d.message.forwardedFrom || null,
+      reply_to: d.message.replyTo || null,
       red_total_cents: d.message.redEnvelope?.totalCents || 0,
       red_remaining_cents: d.message.redEnvelope?.remainingCents || 0,
       red_total_count: d.message.redEnvelope?.totalCount || 0,
@@ -2586,16 +2682,18 @@ $("#sendForm").onsubmit = e => {
     return;
   }
   stopTyping();
-  socket.send(JSON.stringify({ body }));
+  const target = replyTarget;
+  socket.send(JSON.stringify(target ? { body, replyTo: target.id } : { body }));
   let pendingEl = null;
   try {
-    pendingEl = renderPendingMessage(body);
+    pendingEl = renderPendingMessage(body, target ? target.id : null);
   } catch {}
   setTimeout(() => {
     if (pendingEl && pendingEl.isConnected) pendingEl.remove();
   }, 20000);
   conversationDrafts.delete(String(activeConversation));
   $("#messageInput").value = "";
+  clearReplyTarget();
 };
 
 let cloudChatVoiceRecorder = null;
@@ -3072,24 +3170,67 @@ $("#imageButton").addEventListener("click", () => {
   $("#imageFileInput").click();
 });
 
-$("#imageFileInput").addEventListener("change", async event => {
-  const file = event.target.files && event.target.files[0];
-  if (!file) return;
-  event.target.value = "";
-
+async function uploadImageWithFeedback(file) {
   const button = $("#imageButton");
-  button.disabled = true;
-  button.textContent = "上传中";
-
+  if (button) {
+    button.disabled = true;
+    button.textContent = "上传中";
+  }
   try {
     await uploadImageBlob(file);
   } catch (error) {
     alert(error.message || "图片上传失败");
   } finally {
-    button.disabled = false;
-    button.textContent = "图片";
+    if (button) {
+      button.disabled = false;
+      button.textContent = "图片";
+    }
   }
+}
+
+$("#imageFileInput").addEventListener("change", async event => {
+  const file = event.target.files && event.target.files[0];
+  if (!file) return;
+  event.target.value = "";
+  await uploadImageWithFeedback(file);
 });
+
+document.addEventListener("paste", event => {
+  if (!activeConversation) return;
+  const items = event.clipboardData?.items || [];
+  const files = [];
+  for (const item of items) {
+    if (item.kind === "file" && item.type && item.type.startsWith("image/")) {
+      const file = item.getAsFile();
+      if (file) files.push(file);
+    }
+  }
+  if (!files.length) return;
+  event.preventDefault();
+  files.slice(0, 4).forEach(file => uploadImageWithFeedback(file));
+});
+
+const imageDropZone = document.querySelector(".conversation");
+if (imageDropZone) {
+  ["dragenter", "dragover"].forEach(type => {
+    imageDropZone.addEventListener(type, event => {
+      if (!activeConversation) return;
+      event.preventDefault();
+      imageDropZone.classList.add("drop-active");
+    });
+  });
+  ["dragleave", "drop"].forEach(type => {
+    imageDropZone.addEventListener(type, event => {
+      if (!activeConversation) return;
+      event.preventDefault();
+      imageDropZone.classList.remove("drop-active");
+      if (type !== "drop") return;
+      const files = Array.from(event.dataTransfer?.files || [])
+        .filter(file => file.type && file.type.startsWith("image/"));
+      files.slice(0, 4).forEach(file => uploadImageWithFeedback(file));
+    });
+  });
+}
 $("#fileButton").addEventListener("click", () => {
   if (!activeConversation) {
     alert("请先打开一个聊天");
@@ -3160,6 +3301,9 @@ $("#logoutBtn").onclick = async () => {
   me = null;
   notificationBaselineReady = false;
   knownLastMessageIds.clear();
+  messageCache.clear();
+  messageCacheConversation = null;
+  clearReplyTarget();
   boot();
 };
 async function openMyProfile() {

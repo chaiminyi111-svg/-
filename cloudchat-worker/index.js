@@ -4075,7 +4075,7 @@ app.get("/api/conversations/:id/messages", async (c) => {
   const member = await c.env.DB.prepare("SELECT 1 FROM conversation_members WHERE conversation_id=? AND user_id=?").bind(id, user.id).first();
   if (!member) return jsonError(c, 403, "\u65E0\u6743\u67E5\u770B\u8BE5\u4F1A\u8BDD");
   const rows = await c.env.DB.prepare(
-    `SELECT m.id,m.sender_id,m.body,m.message_type,m.created_at,m.recalled_at,m.forwarded_from,
+    `SELECT m.id,m.sender_id,m.body,m.message_type,m.created_at,m.recalled_at,m.forwarded_from,m.reply_to,
        u.display_name AS sender_display_name,
        u.avatar_url AS sender_avatar_url,
        re.total_cents AS red_total_cents,
@@ -5242,13 +5242,14 @@ var ChatRoom = class {
     if (typeof data.body !== "string") return;
     const body = data.body.trim().slice(0, 5e3);
     if (!body) return;
+    const replyTo = typeof data.replyTo === "string" ? data.replyTo.slice(0, 100) : null;
     const id = crypto.randomUUID();
     const createdAt = (/* @__PURE__ */ new Date()).toISOString();
     const insertResult = await this.env.DB.prepare(
       `INSERT INTO messages(
-        id,conversation_id,sender_id,body,message_type,created_at
+        id,conversation_id,sender_id,body,message_type,created_at,reply_to
       )
-      SELECT ?,?,?,?,'text',?
+      SELECT ?,?,?,?,'text',?,?
       WHERE EXISTS (
         SELECT 1
         FROM conversation_members cm
@@ -5262,6 +5263,7 @@ var ChatRoom = class {
       attachment.userId,
       body,
       createdAt,
+      replyTo,
       attachment.conversationId,
       attachment.userId
     ).run();
@@ -5280,7 +5282,8 @@ var ChatRoom = class {
         senderId: attachment.userId,
         senderDisplayName: attachment.displayName || "\u7FA4\u6210\u5458",
         body,
-        createdAt
+        createdAt,
+        replyTo
       }
     });
     await this.sendToCurrentMembers(

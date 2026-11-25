@@ -56,5 +56,7 @@ wrangler deploy
 - 仅后端优化：`c8aa03213cb5412a8385aa90ca99ae8f`
 - 前端 + 后端优化：`d7d076bcb1614c3f8049d1b214d6f567`
 - 前端取消通话/新增拍照：`7a6982f039e344529bd1d4916843a3bc`（脚本未变）
+- 引用回复（`reply_to`）：`940e1d41aa434a4b87864f04ec46edc9`
+- 回复按钮布局优化（脚本未变）：`f53d2c4eaaf44f9b99071d1a83bca7f2`
 
 Cloudflare 控制台 → Workers & Pages → `cloudchat` → 部署 → 选择版本回滚。

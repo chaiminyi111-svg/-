@@ -2318,3 +2318,83 @@
     padding: 9px 12px;
   }
 }
+
+
+/* 引用回复与图片粘贴/拖拽 */
+.message-reply-button {
+  display: block;
+  margin-top: 6px;
+  padding: 3px 8px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: #718096;
+  font-size: 11px;
+  cursor: pointer;
+}
+.message-reply-button:hover {
+  background: #e8eee8;
+  color: #079447;
+}
+.reply-quote {
+  margin: 0 0 7px;
+  padding: 5px 8px;
+  border-left: 3px solid #07c160;
+  border-radius: 4px;
+  background: rgba(7, 193, 96, .08);
+  color: #5f6b7a;
+  font-size: 12px;
+  line-height: 1.5;
+  cursor: pointer;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.reply-quote:hover {
+  background: rgba(7, 193, 96, .14);
+}
+.bubble.mine .reply-quote {
+  background: rgba(0, 0, 0, .06);
+  border-left-color: #0a8f4a;
+}
+.reply-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
+  padding: 8px 14px;
+  border-top: 1px solid #eee;
+  background: #f7f8f7;
+  color: #5f6b7a;
+  font-size: 12px;
+}
+.reply-bar[hidden] {
+  display: none !important;
+}
+#replyBarText {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+#replyBarCancel {
+  flex: 0 0 auto;
+  border: 0;
+  background: transparent;
+  color: #888;
+  font-size: 18px;
+  line-height: 1;
+  padding: 0 4px;
+}
+.conversation.drop-active {
+  outline: 2px dashed #07c160;
+  outline-offset: -6px;
+}
+.bubble > .message-reply-button,
+.bubble > .message-forward-button,
+.bubble > .recall-button,
+.bubble > .message-delete-button {
+  display: inline-block;
+  margin: 6px 6px 0 0;
+}
