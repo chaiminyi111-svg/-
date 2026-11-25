@@ -133,7 +133,21 @@ function startMockTranslate() {
     for await (const chunk of req) body += chunk;
     const url = new URL(req.url, "http://127.0.0.1");
     const payload = body ? JSON.parse(body) : {};
-    calls.push({ path: url.pathname, payload });
+    calls.push({ path: url.pathname, payload, query: Object.fromEntries(url.searchParams) });
+
+    if (url.pathname.endsWith("/translate_a/single")) {
+      const text = String(url.searchParams.get("q") || "");
+      const target = String(url.searchParams.get("tl") || "en");
+      const language = /[\u4e00-\u9fff]/.test(text) ? "zh-CN"
+        : text.toLowerCase().includes("bonjour") ? "fr" : "en";
+      let translatedText = text;
+      if (target === "zh-CN") translatedText = "你好";
+      else if (target === "en") translatedText = "Hello";
+      else if (target === "ja") translatedText = "こんにちは";
+      res.setHeader("content-type", "application/json");
+      res.end(JSON.stringify([[[translatedText, text, null, null, 10]], null, language]));
+      return;
+    }
 
     if (url.pathname.endsWith("/language/translate/v2/detect")) {
       const text = String(payload.q || "");
@@ -1327,6 +1341,8 @@ test("Google translation detects language and translates replies", async t => {
     logLevel: "error",
     googleTranslateApiKey: "",
     googleTranslateApiBase: translateMock.base,
+    googleTranslateWebApiBase: translateMock.base,
+    translateProvider: "google",
     translateTarget: "zh-CN"
   };
 
@@ -1416,6 +1432,26 @@ test("Google translation detects language and translates replies", async t => {
   assert.equal(cleared.response.status, 200);
   assert.equal(cleared.data.translate.configured, false);
   assert.equal(translate.configured(), false);
+
+  const webSaved = await apiRequest(base, "/api/admin/translate", {
+    method: "POST",
+    cookie: adminCookie,
+    body: { provider: "google-web" }
+  });
+  assert.equal(webSaved.response.status, 200, JSON.stringify(webSaved.data));
+  assert.equal(webSaved.data.translate.configured, true);
+  assert.equal(webSaved.data.translate.provider, "google-web");
+  assert.equal(webSaved.data.translate.keyConfigured, false);
+  assert.equal(translate.configured(), true);
+
+  const webInbound = await translate.translateInbound("Hello");
+  assert.equal(webInbound.language, "en");
+  assert.equal(webInbound.translatedBody, "你好");
+  assert.equal(webInbound.translationLanguage, "zh-CN");
+
+  const webOutbound = await translate.prepareOutbound("你好", "en");
+  assert.equal(webOutbound.text, "Hello");
+  assert.equal(webOutbound.meta.translated, true);
 });
 
 

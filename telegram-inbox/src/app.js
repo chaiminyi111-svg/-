@@ -359,17 +359,29 @@ function createApp({ db, config, telegram, whatsapp, broadcaster, logger, transl
   });
 
   app.post("/api/admin/translate", requireAdmin, asyncRoute(async (req, res) => {
+    const provider = String(req.body?.provider || "").trim();
     const apiKey = String(req.body?.apiKey || "").trim();
-    if (!apiKey) return jsonError(res, 400, "请输入 Google 翻译 API Key");
-    if (!translate?.verifyKey) return jsonError(res, 503, "翻译服务不可用");
-    try {
-      await translate.verifyKey(apiKey);
-    } catch (error) {
-      const status = error.code === "TRANSLATION_NETWORK" ? 502 : 400;
-      return jsonError(res, status, error.message || "Google 翻译 API Key 验证失败");
+    if (!provider && !apiKey) return jsonError(res, 400, "请输入 Google 翻译 API Key 或选择翻译通道");
+    if (!translate) return jsonError(res, 503, "翻译服务不可用");
+    if (provider) {
+      try {
+        translate.saveProvider(provider);
+      } catch (error) {
+        return jsonError(res, 400, error.message || "不支持的翻译通道");
+      }
+      audit(db, req.user.id, "translate.provider_updated", "channel", "google_translate", provider);
     }
-    translate.saveApiKey(apiKey);
-    audit(db, req.user.id, "translate.credentials_updated", "channel", "google_translate");
+    if (apiKey) {
+      if (!translate.verifyKey) return jsonError(res, 503, "翻译服务不可用");
+      try {
+        await translate.verifyKey(apiKey);
+      } catch (error) {
+        const status = error.code === "TRANSLATION_NETWORK" ? 502 : 400;
+        return jsonError(res, status, error.message || "Google 翻译 API Key 验证失败");
+      }
+      translate.saveApiKey(apiKey);
+      audit(db, req.user.id, "translate.credentials_updated", "channel", "google_translate");
+    }
     res.json({ translate: translate.status() });
   }));
 

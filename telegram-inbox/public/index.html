@@ -562,6 +562,13 @@
 
       <form id="translateForm" class="channel-form">
         <label>
+          翻译通道
+          <select id="translateProvider">
+            <option value="google">Google Cloud Translation API（官方，需要 Key）</option>
+            <option value="google-web">translate.googleapis.com（非官方备用，无需 Key）</option>
+          </select>
+        </label>
+        <label>
           Google Cloud Translation API Key
           <input
             id="translateKeyInput"
@@ -572,7 +579,7 @@
             maxlength="200"
           >
         </label>
-        <p class="channel-note">保存前会调用 Google 翻译接口验证 Key。Key 只保存在服务器数据库，不会回显到页面。启用后会自动识别客户语言，并把外文消息翻译为中文显示。</p>
+        <p class="channel-note">官方 API 需要 Key，保存前会验证。备用通道直接调用 translate.googleapis.com，无需 Key，但不是 Google 官方 API，可能限流或失效，仅建议测试使用。Key 只保存在服务器数据库，不会回显到页面。</p>
         <div class="channel-actions">
           <button class="primary" type="submit" id="translateSaveBtn">验证并保存</button>
           <button class="ghost" type="button" id="translateClearBtn" hidden>清除 Key</button>
@@ -582,7 +589,7 @@
 
       <div class="channel-help">
         <strong>怎么获取 Key？</strong>
-        <p>在 Google Cloud Console 启用 Cloud Translation API，创建 API Key 后填入这里。Key 仅用于服务端调用，不会发送到浏览器。</p>
+        <p>在 Google Cloud Console 启用 Cloud Translation API，创建 API Key 后填入这里。Key 仅用于服务端调用，不会发送到浏览器。没有 Key 时可先切换到非官方备用通道测试。</p>
       </div>
     </div>
   </div>

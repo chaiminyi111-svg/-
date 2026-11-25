@@ -40,6 +40,8 @@ const config = {
   whatsappApiBase: (process.env.WHATSAPP_API_BASE || "https://graph.facebook.com/v20.0").replace(/\/+$/, ""),
   googleTranslateApiKey: (process.env.GOOGLE_TRANSLATE_API_KEY || "").trim(),
   googleTranslateApiBase: (process.env.GOOGLE_TRANSLATE_API_BASE || "https://translation.googleapis.com").replace(/\/+$/, ""),
+  googleTranslateWebApiBase: (process.env.GOOGLE_TRANSLATE_WEB_API_BASE || "https://translate.googleapis.com").replace(/\/+$/, ""),
+  translateProvider: (process.env.TRANSLATE_PROVIDER || "google").trim(),
   translateTarget: (process.env.TRANSLATE_TARGET || "zh-CN").trim(),
   translateTimeoutMs: readInt("TRANSLATE_TIMEOUT_MS", 10000),
   autoAssign: readBool("AUTO_ASSIGN", false),

@@ -9,7 +9,7 @@
 - Telegram Bot 长轮询收消息，无需公网 webhook
 - WhatsApp Cloud API webhook 收消息，支持文本回复
 - 统一收件箱：私聊、群聊、未读计数、消息预览、渠道标识
-- Google 翻译：自动识别客户语言，外文消息自动翻译为中文；回复时可选择「跟随客户语言」或指定其他语言
+- Google 翻译：自动识别客户语言，外文消息自动翻译为中文；回复时可选择「跟随客户语言」或指定其他语言。支持官方 Cloud Translation API 和非官方 `translate.googleapis.com` 备用通道
 - 客服分配：管理员可分配给任意客服；支持自动分配（当前接待最少/轮询）和每人接待上限
 - 会话可见范围：管理员可查看全部；普通客服只能查看自己名下和未分配的会话，不能查看其他客服的会话
 - 会话状态：待处理、跟进中、已关闭
@@ -230,6 +230,8 @@ TRUST_PROXY=true
 | `WHATSAPP_API_BASE` | `https://graph.facebook.com/v20.0` | Meta Graph API 地址 |
 | `GOOGLE_TRANSLATE_API_KEY` | 空 | Google Cloud Translation API Key；也可在「渠道」页面保存 |
 | `GOOGLE_TRANSLATE_API_BASE` | `https://translation.googleapis.com` | Google 翻译 API 地址 |
+| `TRANSLATE_PROVIDER` | `google` | `google`（官方 API，需要 Key）/ `google-web`（非官方备用，无需 Key） |
+| `GOOGLE_TRANSLATE_WEB_API_BASE` | `https://translate.googleapis.com` | 非官方备用翻译接口地址 |
 | `TRANSLATE_TARGET` | `zh-CN` | 入站外文消息默认翻译目标语言 |
 | `TRANSLATE_TIMEOUT_MS` | `10000` | 翻译请求超时毫秒数 |
 | `AUTO_ASSIGN` | `false` | 是否自动分配新会话；也可在「团队」页面开启 |

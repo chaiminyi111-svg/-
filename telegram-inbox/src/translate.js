@@ -1,7 +1,13 @@
 const { getSetting, setSetting } = require("./db");
 
 const API_KEY_SETTING = "google_translate_api_key";
+const PROVIDER_SETTING = "translate_provider";
 const DEFAULT_TARGET = "zh-CN";
+
+const PROVIDERS = [
+  { code: "google", label: "Google Cloud Translation API（官方，需要 Key）" },
+  { code: "google-web", label: "translate.googleapis.com（非官方备用，无需 Key）" }
+];
 
 const LANGUAGES = [
   { code: "zh-CN", label: "中文（简体）" },
@@ -49,6 +55,16 @@ function languageLabel(code) {
   return LANGUAGE_LABELS[normalized] || (normalized === "auto" ? "自动识别" : normalized);
 }
 
+function normalizeProvider(value) {
+  const raw = String(value || "").trim().toLowerCase();
+  return ["google-web", "web", "unofficial"].includes(raw) ? "google-web" : "google";
+}
+
+function providerLabel(code) {
+  const normalized = normalizeProvider(code);
+  return PROVIDERS.find(item => item.code === normalized)?.label || normalized;
+}
+
 function sameLanguage(a, b) {
   const left = normalizeLanguage(a);
   const right = normalizeLanguage(b);
@@ -72,6 +88,10 @@ function createTranslateService({ db, config = {}, logger } = {}) {
   const apiBase = String(
     config.googleTranslateApiBase || "https://translation.googleapis.com"
   ).replace(/\/+$/, "");
+  const webApiBase = String(
+    config.googleTranslateWebApiBase || "https://translate.googleapis.com"
+  ).replace(/\/+$/, "");
+  const envProvider = normalizeProvider(config.translateProvider || "google");
   const defaultTarget = normalizeLanguage(config.translateTarget || DEFAULT_TARGET);
   const timeoutMs = Math.min(Math.max(Number(config.translateTimeoutMs) || 10000, 1000), 30000);
 
@@ -83,19 +103,38 @@ function createTranslateService({ db, config = {}, logger } = {}) {
     return databaseKey() || envKey;
   }
 
+  function currentProvider() {
+    const stored = getSetting(db, PROVIDER_SETTING, null);
+    return normalizeProvider(stored || envProvider);
+  }
+
   function configured() {
+    if (currentProvider() === "google-web") return true;
     return Boolean(currentKey());
   }
 
   function status() {
     const dbKey = databaseKey();
+    const provider = currentProvider();
     return {
-      configured: Boolean(dbKey || envKey),
+      configured: configured(),
       source: dbKey ? "database" : envKey ? "environment" : "none",
-      provider: "google",
+      provider,
+      providerLabel: providerLabel(provider),
+      keyConfigured: Boolean(dbKey || envKey),
+      providers: PROVIDERS,
       defaultTarget,
       languages: LANGUAGES
     };
+  }
+
+  function saveProvider(value) {
+    const raw = String(value || "").trim().toLowerCase();
+    if (!PROVIDERS.some(item => item.code === raw)) {
+      throw new TranslationError("不支持的翻译通道", "INVALID_PROVIDER");
+    }
+    setSetting(db, PROVIDER_SETTING, raw);
+    return status();
   }
 
   function saveApiKey(value) {
@@ -106,6 +145,54 @@ function createTranslateService({ db, config = {}, logger } = {}) {
 
   function clearApiKey() {
     db.prepare("DELETE FROM settings WHERE key = ?").run(API_KEY_SETTING);
+  }
+
+  async function webRequest(text, target, source = "auto") {
+    const targetLanguage = normalizeLanguage(target);
+    if (targetLanguage === "auto") {
+      throw new TranslationError("请选择目标语言", "INVALID_LANGUAGE");
+    }
+    const params = new URLSearchParams({
+      client: "gtx",
+      sl: normalizeLanguage(source),
+      tl: targetLanguage,
+      dt: "t",
+      q: String(text || "").slice(0, 10000)
+    });
+    let response;
+    try {
+      response = await fetch(`${webApiBase}/translate_a/single?${params.toString()}`, {
+        headers: { "user-agent": "Mozilla/5.0" },
+        signal: AbortSignal.timeout(timeoutMs)
+      });
+    } catch (error) {
+      logger?.warn("Google 网页翻译请求失败", error.message);
+      throw new TranslationError("无法连接 Google 网页翻译服务", "TRANSLATION_NETWORK");
+    }
+
+    let data = null;
+    try {
+      data = await response.json();
+    } catch {}
+    if (!response.ok || !Array.isArray(data)) {
+      throw new TranslationError(
+        `Google 网页翻译请求失败（HTTP ${response.status}）`,
+        "TRANSLATION_ERROR"
+      );
+    }
+
+    const translated = (Array.isArray(data[0]) ? data[0] : [])
+      .map(segment => Array.isArray(segment) ? segment[0] : "")
+      .filter(Boolean)
+      .join("");
+    if (!translated) {
+      throw new TranslationError("Google 网页翻译返回为空", "TRANSLATION_ERROR");
+    }
+    return {
+      text: decodeEntities(translated),
+      detectedLanguage: normalizeLanguage(data[2] || source || "auto"),
+      targetLanguage
+    };
   }
 
   async function request(path, payload, keyOverride = null) {
@@ -146,6 +233,10 @@ function createTranslateService({ db, config = {}, logger } = {}) {
   }
 
   async function detect(text) {
+    if (currentProvider() === "google-web") {
+      const result = await webRequest(text, "en");
+      return { language: result.detectedLanguage, confidence: 1 };
+    }
     const data = await request("/language/translate/v2/detect", {
       q: String(text || "").slice(0, 10000),
       format: "text"
@@ -161,6 +252,9 @@ function createTranslateService({ db, config = {}, logger } = {}) {
     const targetLanguage = normalizeLanguage(target);
     if (targetLanguage === "auto") {
       throw new TranslationError("请选择目标语言", "INVALID_LANGUAGE");
+    }
+    if (currentProvider() === "google-web") {
+      return webRequest(text, targetLanguage, sourceLanguage);
     }
     const payload = {
       q: String(text || ""),
@@ -261,6 +355,7 @@ function createTranslateService({ db, config = {}, logger } = {}) {
     configured,
     status,
     saveApiKey,
+    saveProvider,
     clearApiKey,
     detect,
     translate,
@@ -276,7 +371,10 @@ module.exports = {
   createTranslateService,
   TranslationError,
   LANGUAGES,
+  PROVIDERS,
   languageLabel,
+  normalizeProvider,
+  providerLabel,
   normalizeLanguage,
   sameLanguage,
   isTranslatableText

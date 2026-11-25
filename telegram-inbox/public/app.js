@@ -1729,20 +1729,49 @@ function renderWhatsAppSettings() {
 function renderTranslateSettings() {
   const settings = state.channels.translate || state.translate || {};
   const configured = Boolean(settings.configured);
+  const provider = settings.provider || "google";
+  const web = provider === "google-web";
   $("#translateDot").className = "channel-dot " + (configured ? "on" : "off");
+  $("#translateProvider").value = provider;
   let text;
   if (!configured) {
     text = "未配置，填写 Google Cloud Translation API Key 后启用";
+  } else if (web) {
+    text = "已启用 · 非官方备用通道（无需 Key）";
   } else {
     text = "已启用，会自动识别客户语言并翻译外文消息";
     if (settings.source === "environment") text += " · 来自环境变量";
     else if (settings.source === "database") text += " · 已保存到服务器";
   }
   $("#translateStatusText").textContent = text;
-  $("#translateClearBtn").hidden = !configured || settings.source === "environment";
-  $("#translateKeyInput").placeholder = configured
+  $("#translateClearBtn").hidden = !settings.keyConfigured || settings.source === "environment";
+  $("#translateKeyInput").placeholder = settings.keyConfigured
     ? "已配置，留空保持不变"
-    : "AIza...（需要启用 Cloud Translation API）";
+    : web
+      ? "当前使用备用通道；切换官方 API 时再填写"
+      : "AIza...（需要启用 Cloud Translation API）";
+}
+
+async function saveTranslateProvider() {
+  const select = $("#translateProvider");
+  const provider = select.value;
+  select.disabled = true;
+  setChannelError("translateError", "");
+  try {
+    const data = await api("/api/admin/translate", {
+      method: "POST",
+      body: { provider }
+    });
+    state.channels.translate = data.translate;
+    state.translate = { ...state.translate, ...data.translate };
+    renderChannelSettings();
+    if (state.active) renderChatHeader();
+    showToast(provider === "google-web" ? "已切换到非官方备用翻译通道" : "已切换到官方翻译 API", "success");
+  } catch (error) {
+    setChannelError("translateError", error.message);
+  } finally {
+    select.disabled = false;
+  }
 }
 
 function renderChannelSettings() {
@@ -1957,7 +1986,11 @@ async function saveTranslateKey(event) {
 }
 
 async function clearTranslateKey() {
-  if (!window.confirm("确定清除 Google 翻译 API Key？清除后将停止自动识别和翻译。")) return;
+  const web = state.channels.translate?.provider === "google-web";
+  const message = web
+    ? "确定清除官方 Google 翻译 API Key？当前使用备用通道，清除后仍会继续翻译。"
+    : "确定清除 Google 翻译 API Key？清除后将停止自动识别和翻译。";
+  if (!window.confirm(message)) return;
 
   const button = $("#translateClearBtn");
   button.disabled = true;
@@ -2350,6 +2383,7 @@ function bindEvents() {
   $("#whatsappForm").addEventListener("submit", saveWhatsAppCredentials);
   $("#whatsappClearBtn").addEventListener("click", clearWhatsAppCredentials);
   $("#translateForm").addEventListener("submit", saveTranslateKey);
+  $("#translateProvider").addEventListener("change", saveTranslateProvider);
   $("#translateClearBtn").addEventListener("click", clearTranslateKey);
   $("#replyLanguage").addEventListener("change", () => {
     if (state.active) state.replyLanguages[state.active.id] = $("#replyLanguage").value;
