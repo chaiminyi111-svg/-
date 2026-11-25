@@ -29,9 +29,7 @@ function createBroadcaster(logger) {
           const assigneeId = event.conversation
             ? event.conversation.assigneeId
             : event.assigneeId;
-          if (assigneeId !== undefined && assigneeId !== null && assigneeId !== user.id) {
-            continue;
-          }
+          if (assigneeId !== user.id) continue;
         }
         try {
           res.write(payload);

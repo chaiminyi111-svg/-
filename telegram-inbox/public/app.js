@@ -18,6 +18,9 @@ const state = {
   customerDirty: false,
   stats: null,
   statsDays: 7,
+  sidebarStats: null,
+  sidebarTimer: null,
+  viewerDays: 1,
   channels: { telegram: null, whatsapp: null },
   telegramConfigured: false,
   whatsappConfigured: false,
@@ -127,30 +130,61 @@ async function boot() {
 }
 
 async function enterInbox() {
+  if (state.me.role === "viewer") {
+    showViewer();
+    await loadViewerStats();
+    return;
+  }
   showInbox();
   await loadUsers();
   await loadConversations();
+  await loadSidebarStats();
   connectRealtime();
   startFallbackPolling();
 }
 
+function roleLabel(role) {
+  return { admin: "管理员", agent: "客服", viewer: "统计员" }[role] || role;
+}
+
 function applyRoleScope() {
   const isAdmin = state.me?.role === "admin";
-  const allTab = document.querySelector('.scope-tab[data-scope="all"]');
-  if (allTab) allTab.hidden = !isAdmin;
+  for (const tab of $$(".scope-tab")) {
+    if (tab.dataset.scope === "mine") continue;
+    tab.hidden = !isAdmin;
+  }
   document.querySelector(".scope-tabs")?.classList.toggle("agent", !isAdmin);
-  if (!isAdmin && state.filters.scope === "all") state.filters.scope = "mine";
+  if (!isAdmin && state.filters.scope !== "mine") state.filters.scope = "mine";
   $$(".scope-tab").forEach(tab => tab.classList.toggle("active", tab.dataset.scope === state.filters.scope));
+}
+
+function showViewer() {
+  stopRealtime();
+  stopFallbackPolling();
+  $("#loginView").hidden = true;
+  $("#inboxView").hidden = true;
+  $("#viewerView").hidden = false;
+  $("#viewerUser").textContent = `${state.me.displayName} · 统计员`;
+  $("#viewerRange").value = String(state.viewerDays || 1);
+  document.title = "客服统计 · 只读看板";
 }
 
 function showInbox() {
   $("#loginView").hidden = true;
+  $("#viewerView").hidden = true;
   $("#inboxView").hidden = false;
-  $("#currentUser").textContent = `${state.me.displayName} · ${state.me.role === "admin" ? "管理员" : "客服"}`;
+  $("#currentUser").textContent = `${state.me.displayName} · ${roleLabel(state.me.role)}`;
   $("#channelsBtn").hidden = state.me.role !== "admin";
   $("#teamBtn").hidden = state.me.role !== "admin";
   applyRoleScope();
   renderTelegramState();
+}
+
+async function logout() {
+  try {
+    await api("/api/auth/logout", { method: "POST" });
+  } catch {}
+  showLogin();
 }
 
 function showLogin() {
@@ -167,6 +201,7 @@ function showLogin() {
   state.uploading = false;
   document.body.classList.remove("mobile-chat-open");
   $("#inboxView").hidden = true;
+  $("#viewerView").hidden = true;
   $("#loginView").hidden = false;
   $("#channelsModal").hidden = true;
   $("#teamModal").hidden = true;
@@ -175,6 +210,8 @@ function showLogin() {
   $("#statsModal").hidden = true;
   $("#customerPanel").hidden = true;
   state.stats = null;
+  state.sidebarStats = null;
+  state.viewerDays = 1;
   state.channels = { telegram: null, whatsapp: null };
   state.cannedReplies = [];
   state.editingCannedId = null;
@@ -206,6 +243,7 @@ async function loadConversations(options = {}) {
     state.counts = data.counts || {};
     renderConversationList();
     renderCounts();
+    scheduleSidebarStats();
 
     if (state.activeId) {
       const active = data.items.find(item => item.id === state.activeId);
@@ -238,8 +276,10 @@ function renderCounts() {
   const total = state.counts.all ?? 0;
   const open = state.counts.open ?? 0;
   $("#inboxSubtitle").textContent = total
-    ? `${total} 个会话 · ${open} 个待处理`
-    : "Telegram 私聊与群聊";
+    ? (state.me.role === "admin"
+      ? `${total} 个会话 · ${open} 个待处理`
+      : `${total} 个分配给我的会话 · ${open} 个待处理`)
+    : (state.me.role === "admin" ? "Telegram 私聊与群聊" : "暂无分配给我的会话");
 }
 
 function conversationTime(iso) {
@@ -265,9 +305,11 @@ function renderConversationList() {
     $("#listEmpty").hidden = false;
     $("#listEmptyText").textContent = state.filters.q
       ? "没有找到匹配的会话，试试其他关键词。"
-      : (state.telegramConfigured || state.whatsappConfigured)
-        ? "在 Telegram 或 WhatsApp 里给客户发一条消息，就会出现在这里。"
-        : "配置 TELEGRAM_BOT_TOKEN 或 WHATSAPP_* 并重启服务后，消息会出现在这里。";
+      : state.me.role === "agent"
+        ? "管理员分配会话后，会显示在这里。"
+        : (state.telegramConfigured || state.whatsappConfigured)
+          ? "在 Telegram 或 WhatsApp 里给客户发一条消息，就会出现在这里。"
+          : "配置 TELEGRAM_BOT_TOKEN 或 WHATSAPP_* 并重启服务后，消息会出现在这里。";
     updateDocumentTitle();
     return;
   }
@@ -672,34 +714,35 @@ function renderAssigneeOptions(conversation) {
     select.appendChild(option);
   };
 
-  addOption(null, "未分配");
+  const isAdmin = state.me.role === "admin";
+  select.disabled = !isAdmin;
 
-  if (state.me.role === "admin") {
+  if (isAdmin) {
+    addOption(null, "未分配");
     for (const user of state.users) {
+      if (user.role === "viewer") continue;
       addOption(user.id, user.displayName);
     }
     if (
       conversation.assigneeId &&
-      !state.users.some(user => user.id === conversation.assigneeId)
+      !state.users.some(user => user.id === conversation.assigneeId && user.role !== "viewer")
     ) {
-      addOption(conversation.assigneeId, (conversation.assigneeName || "已停用客服") + "（已停用）", true);
+      addOption(conversation.assigneeId, (conversation.assigneeName || "已停用客服") + "（不可分配）", true);
     }
+  } else if (conversation.assigneeId) {
+    addOption(
+      conversation.assigneeId,
+      conversation.assigneeId === state.me.id ? "我" : (conversation.assigneeName || "其他客服"),
+      true
+    );
   } else {
-    if (conversation.assigneeId && conversation.assigneeId !== state.me.id) {
-      addOption(conversation.assigneeId, (conversation.assigneeName || "其他客服") + "（当前）", true);
-    }
-    addOption(state.me.id, "我");
+    addOption(null, "未分配", true);
   }
 
   select.value = conversation.assigneeId ? String(conversation.assigneeId) : "";
 
   const claim = $("#claimBtn");
-  if (state.me.role === "admin") {
-    claim.hidden = true;
-  } else {
-    claim.hidden = false;
-    claim.textContent = conversation.assigneeId === state.me.id ? "取消分配" : "分配给我";
-  }
+  claim.hidden = true;
 }
 
 function channelLabel(channel) {
@@ -747,6 +790,7 @@ async function updateConversation(payload) {
     upsertConversation(data.conversation);
     renderChatHeader();
     renderConversationList();
+    scheduleSidebarStats();
     scheduleRefresh();
     showToast("会话已更新", "success");
   } catch (error) {
@@ -765,6 +809,7 @@ async function markRead(id, options = {}) {
     conversation.unreadCount = 0;
     if (state.activeId === id && state.active) state.active.unreadCount = 0;
     renderConversationList();
+    scheduleSidebarStats();
   } catch (error) {
     if (!options.silent && error.status !== 401) showToast(error.message, "error");
   } finally {
@@ -833,6 +878,7 @@ function handleRealtime(event) {
       renderMessages();
     }
     renderConversationList();
+    scheduleSidebarStats();
     return;
   }
 
@@ -850,6 +896,7 @@ function handleRealtime(event) {
     }
     renderConversationList();
     if (state.active) renderChatHeader();
+    scheduleSidebarStats();
     scheduleRefresh();
     return;
   }
@@ -857,6 +904,7 @@ function handleRealtime(event) {
   if (event.type === "conversation.created" || event.type === "conversation.updated") {
     renderConversationList();
     if (state.activeId === event.conversation?.id) renderChatHeader();
+    scheduleSidebarStats();
     scheduleRefresh();
     return;
   }
@@ -866,6 +914,7 @@ function handleRealtime(event) {
     if (conversation) conversation.unreadCount = 0;
     if (state.activeId === event.conversationId && state.active) state.active.unreadCount = 0;
     renderConversationList();
+    scheduleSidebarStats();
   }
 }
 
@@ -943,6 +992,7 @@ async function sendMessage() {
       renderMessages({ scrollToBottom: true });
       renderChatHeader();
       renderConversationList();
+      scheduleSidebarStats();
     }
     input.value = "";
     updateCharCount();
@@ -1016,6 +1066,7 @@ async function uploadAttachment(file) {
       renderMessages({ scrollToBottom: true });
       renderChatHeader();
       renderConversationList();
+      scheduleSidebarStats();
     }
     $("#messageInput").value = "";
     updateCharCount();
@@ -1028,6 +1079,55 @@ async function uploadAttachment(file) {
     $("#fileInput").value = "";
     button.textContent = "附件";
     renderTelegramState();
+  }
+}
+
+/* ---------- Sidebar stats ---------- */
+function scheduleSidebarStats() {
+  if (!state.me || state.me.role === "viewer") return;
+  if (state.sidebarTimer) clearTimeout(state.sidebarTimer);
+  state.sidebarTimer = setTimeout(loadSidebarStats, 500);
+}
+
+async function loadSidebarStats() {
+  if (!state.me || state.me.role === "viewer") return;
+  try {
+    const data = await api("/api/stats?days=1");
+    state.sidebarStats = data.stats;
+    renderSidebarStats();
+  } catch {}
+}
+
+function renderSidebarStats() {
+  const stats = state.sidebarStats;
+  if (!stats) return;
+  const isAdmin = state.me.role === "admin";
+  const agents = (isAdmin
+    ? stats.agents.slice()
+    : stats.agents.filter(agent => agent.id === state.me.id))
+    .sort((a, b) => b.newConversations - a.newConversations || b.assigned - a.assigned);
+
+  const own = agents[0] || {};
+  $("#sidebarIncoming").textContent = Number(isAdmin ? stats.totals.newConversations : own.newConversations || 0)
+    .toLocaleString("zh-CN");
+  $("#sidebarActive").textContent = Number(isAdmin ? stats.totals.assigned : own.assigned || 0)
+    .toLocaleString("zh-CN");
+  $("#sidebarUnread").textContent = Number(isAdmin ? stats.totals.unread : own.unread || 0)
+    .toLocaleString("zh-CN");
+  $("#sidebarStatsHint").textContent = isAdmin ? "全团队 · 今日" : "我的 · 今日";
+  $("#sidebarStats").classList.toggle("agent", !isAdmin);
+
+  const rows = $("#sidebarAgentRows");
+  rows.replaceChildren();
+  for (const agent of agents) {
+    const row = document.createElement("div");
+    row.className = "sidebar-agent-row";
+    const name = document.createElement("strong");
+    name.textContent = agent.displayName;
+    const value = document.createElement("span");
+    value.textContent = `进人 ${agent.newConversations} · 接待 ${agent.assigned}`;
+    row.append(name, value);
+    rows.appendChild(row);
   }
 }
 
@@ -1050,87 +1150,120 @@ async function loadStats() {
   }
 }
 
+async function loadViewerStats() {
+  const days = Number($("#viewerRange").value) || 1;
+  try {
+    const data = await api(`/api/stats?days=${days}`);
+    state.stats = data.stats;
+    state.viewerDays = days;
+    renderStats();
+    $("#viewerSubtitle").textContent = days === 1
+      ? "只读统计账号 · 今日数据 · 不显示客户会话内容。"
+      : `只读统计账号 · 最近 ${days} 天 · 不显示客户会话内容。`;
+  } catch (error) {
+    showToast(error.message, "error");
+  }
+}
+
+function rangeLabel(days) {
+  return Number(days) === 1 ? "今日" : `最近 ${days} 天`;
+}
+
 function renderStats() {
   const stats = state.stats;
   if (!stats) return;
   const totals = stats.totals;
 
   const cards = [
-    ["会话总数", totals.conversations, "全部会话"],
-    ["区间新会话", totals.newConversations, `最近 ${stats.rangeDays} 天`],
+    ["区间进人", totals.newConversations, rangeLabel(stats.rangeDays)],
+    ["新分配", totals.newAssigned, "管理员分配"],
+    ["当前接待", totals.assigned, "已分配会话"],
+    ["未读消息", totals.unread, "客户未读"],
     ["收到消息", totals.messagesIn, "客户发来"],
-    ["发出消息", totals.messagesOut, "客服发出"],
+    ["发出消息", totals.messagesOut, "客服回复"],
     ["待处理", totals.open, "需要跟进"],
-    ["跟进中", totals.pending, "正在处理"],
-    ["未分配", totals.unassigned, "等待领取"],
-    ["启用账号", totals.activeAgents, "管理员 + 客服"]
+    ["未分配", totals.unassigned, "等待分配"]
   ];
 
-  const cardBox = $("#statsCards");
-  cardBox.replaceChildren();
-  for (const [label, value, hint] of cards) {
-    const item = document.createElement("div");
-    item.className = "stats-card-item";
-    const name = document.createElement("span");
-    name.textContent = label;
-    const number = document.createElement("strong");
-    number.textContent = Number(value || 0).toLocaleString("zh-CN");
-    const note = document.createElement("small");
-    note.textContent = hint;
-    item.append(name, number, note);
-    cardBox.appendChild(item);
+  for (const cardBox of [$("#statsCards"), $("#viewerCards")]) {
+    if (!cardBox) continue;
+    cardBox.replaceChildren();
+    for (const [label, value, hint] of cards) {
+      const item = document.createElement("div");
+      item.className = "stats-card-item";
+      const name = document.createElement("span");
+      name.textContent = label;
+      const number = document.createElement("strong");
+      number.textContent = Number(value || 0).toLocaleString("zh-CN");
+      const note = document.createElement("small");
+      note.textContent = hint;
+      item.append(name, number, note);
+      cardBox.appendChild(item);
+    }
   }
 
   const chart = $("#statsChart");
-  chart.replaceChildren();
-  const max = Math.max(
-    1,
-    ...stats.daily.flatMap(day => [Number(day.inbound || 0), Number(day.outbound || 0)])
-  );
-  for (const day of stats.daily) {
-    const column = document.createElement("div");
-    column.className = "chart-day";
-    column.title = `${day.date}：收到 ${day.inbound}，发出 ${day.outbound}，新会话 ${day.newConversations}`;
+  if (chart) {
+    chart.replaceChildren();
+    const max = Math.max(
+      1,
+      ...stats.daily.flatMap(day => [Number(day.inbound || 0), Number(day.outbound || 0)])
+    );
+    for (const day of stats.daily) {
+      const column = document.createElement("div");
+      column.className = "chart-day";
+      column.title = `${day.date}：收到 ${day.inbound}，发出 ${day.outbound}，新会话 ${day.newConversations}`;
 
-    const bars = document.createElement("div");
-    bars.className = "chart-bars";
-    for (const [kind, value] of [["in", day.inbound], ["out", day.outbound]]) {
-      const bar = document.createElement("i");
-      bar.className = `chart-bar ${kind}`;
-      bar.style.height = `${Math.max(2, Math.round((Number(value || 0) / max) * 100))}%`;
-      bars.appendChild(bar);
+      const bars = document.createElement("div");
+      bars.className = "chart-bars";
+      for (const [kind, value] of [["in", day.inbound], ["out", day.outbound]]) {
+        const bar = document.createElement("i");
+        bar.className = `chart-bar ${kind}`;
+        bar.style.height = `${Math.max(2, Math.round((Number(value || 0) / max) * 100))}%`;
+        bars.appendChild(bar);
+      }
+
+      const label = document.createElement("span");
+      label.className = "chart-label";
+      label.textContent = day.date.slice(5).replace("-", "/");
+      column.append(bars, label);
+      chart.appendChild(column);
     }
-
-    const label = document.createElement("span");
-    label.className = "chart-label";
-    label.textContent = day.date.slice(5).replace("-", "/");
-    column.append(bars, label);
-    chart.appendChild(column);
   }
 
-  const tbody = $("#statsAgentRows");
-  tbody.replaceChildren();
-  if (!stats.agents.length) {
-    const row = document.createElement("tr");
-    const cell = document.createElement("td");
-    cell.colSpan = 6;
-    cell.className = "stats-empty";
-    cell.textContent = "暂无客服数据";
-    row.appendChild(cell);
-    tbody.appendChild(row);
-  } else {
+  for (const tbody of [$("#statsAgentRows"), $("#viewerAgentRows")]) {
+    if (!tbody) continue;
+    tbody.replaceChildren();
+    if (!stats.agents.length) {
+      const row = document.createElement("tr");
+      const cell = document.createElement("td");
+      cell.colSpan = 9;
+      cell.className = "stats-empty";
+      cell.textContent = "暂无客服数据";
+      row.appendChild(cell);
+      tbody.appendChild(row);
+      continue;
+    }
     for (const agent of stats.agents) {
       const row = document.createElement("tr");
-
       const nameCell = document.createElement("td");
       nameCell.className = "agent-cell";
       const name = document.createElement("strong");
       name.textContent = agent.displayName;
       const username = document.createElement("span");
-      username.textContent = "@" + agent.username + " · " + (agent.role === "admin" ? "管理员" : "客服");
+      username.textContent = "@" + agent.username + " · " + roleLabel(agent.role);
       nameCell.append(name, username);
 
-      const values = [agent.assigned, agent.open, agent.pending, agent.closed, agent.outbound];
+      const values = [
+        agent.newConversations,
+        agent.newAssigned,
+        agent.assigned,
+        agent.open,
+        agent.pending,
+        agent.closed,
+        agent.unread,
+        agent.outbound
+      ];
       row.appendChild(nameCell);
       for (const value of values) {
         const cell = document.createElement("td");
@@ -1668,7 +1801,7 @@ function renderTeamUsers() {
     const name = document.createElement("strong");
     name.textContent = user.displayName + (user.id === state.me.id ? "（我）" : "");
     const username = document.createElement("span");
-    username.textContent = "@" + user.username + (user.active ? "" : " · 已停用");
+    username.textContent = "@" + user.username + " · " + roleLabel(user.role) + (user.active ? "" : " · 已停用");
     info.append(name, username);
 
     const controls = document.createElement("div");
@@ -1676,7 +1809,7 @@ function renderTeamUsers() {
 
     const role = document.createElement("select");
     role.setAttribute("aria-label", "角色");
-    role.innerHTML = '<option value="agent">客服</option><option value="admin">管理员</option>';
+    role.innerHTML = '<option value="agent">客服</option><option value="viewer">统计员</option><option value="admin">管理员</option>';
     role.value = user.role;
     role.disabled = !user.active;
     role.addEventListener("change", () => updateTeamUser(user.id, { role: role.value }));
@@ -1705,12 +1838,17 @@ async function updateTeamUser(id, payload) {
     const data = await api(`/api/users/${id}`, { method: "PATCH", body: payload });
     if (data.user.id === state.me.id) {
       state.me = data.user;
-      $("#currentUser").textContent = `${state.me.displayName} · ${state.me.role === "admin" ? "管理员" : "客服"}`;
+      $("#currentUser").textContent = `${state.me.displayName} · ${roleLabel(state.me.role)}`;
       $("#channelsBtn").hidden = state.me.role !== "admin";
       $("#teamBtn").hidden = state.me.role !== "admin";
       if (state.me.role !== "admin") {
         $("#channelsModal").hidden = true;
         $("#teamModal").hidden = true;
+      }
+      if (state.me.role === "viewer") {
+        showToast("成员已更新", "success");
+        await enterInbox();
+        return;
       }
       applyRoleScope();
     }
@@ -1833,16 +1971,20 @@ function bindEvents() {
     }
   });
 
-  $("#logoutBtn").addEventListener("click", async () => {
-    try {
-      await api("/api/auth/logout", { method: "POST" });
-    } catch {}
-    showLogin();
+  $("#logoutBtn").addEventListener("click", logout);
+  $("#viewerLogoutBtn").addEventListener("click", logout);
+  $("#viewerRefresh").addEventListener("click", loadViewerStats);
+  $("#viewerRange").addEventListener("change", loadViewerStats);
+  $("#viewerPasswordBtn").addEventListener("click", () => {
+    $("#passwordModal").hidden = false;
+    $("#passwordError").hidden = true;
+    $("#passwordForm").reset();
   });
 
   $("#refreshBtn").addEventListener("click", async () => {
     await loadConversations();
     if (state.activeId) await refreshActiveThread();
+    await loadSidebarStats();
     showToast("已刷新", "success");
   });
 

@@ -70,7 +70,7 @@ function createApp({ db, config, telegram, whatsapp, broadcaster, logger }) {
     const conversation = id ? getConversationById(db, id) : null;
     if (!conversation) return null;
     if (req.user.role === "admin") return conversation;
-    if (conversation.assignee_id === null || conversation.assignee_id === req.user.id) {
+    if (req.user.role === "agent" && conversation.assignee_id === req.user.id) {
       return conversation;
     }
     return null;
@@ -100,6 +100,20 @@ function createApp({ db, config, telegram, whatsapp, broadcaster, logger }) {
     }
   }));
   app.use(attachUser(db));
+
+  const viewerAllowedPaths = new Set([
+    "/api/health",
+    "/api/auth/me",
+    "/api/auth/logout",
+    "/api/auth/password",
+    "/api/stats"
+  ]);
+  app.use((req, res, next) => {
+    if (req.user?.role !== "viewer") return next();
+    if (!req.path.startsWith("/api/")) return next();
+    if (viewerAllowedPaths.has(req.path)) return next();
+    return jsonError(res, 403, "统计员账号只能查看统计数据");
+  });
 
   app.use((req, res, next) => {
     if (["GET", "HEAD", "OPTIONS"].includes(req.method)) return next();
@@ -227,7 +241,7 @@ function createApp({ db, config, telegram, whatsapp, broadcaster, logger }) {
       return jsonError(res, 400, "显示名称需为 1-40 个字符");
     }
     if (password.length < 8) return jsonError(res, 400, "密码至少 8 位");
-    if (!["admin", "agent"].includes(role)) return jsonError(res, 400, "角色不合法");
+    if (!["admin", "agent", "viewer"].includes(role)) return jsonError(res, 400, "角色不合法");
 
     const now = nowIso();
     try {
@@ -262,7 +276,7 @@ function createApp({ db, config, telegram, whatsapp, broadcaster, logger }) {
     if (!nextDisplayName || nextDisplayName.length > 40) {
       return jsonError(res, 400, "显示名称需为 1-40 个字符");
     }
-    if (!["admin", "agent"].includes(nextRole)) return jsonError(res, 400, "角色不合法");
+    if (!["admin", "agent", "viewer"].includes(nextRole)) return jsonError(res, 400, "角色不合法");
     if (target.id === req.user.id && !nextActive) {
       return jsonError(res, 400, "不能停用当前登录账号");
     }
@@ -280,9 +294,11 @@ function createApp({ db, config, telegram, whatsapp, broadcaster, logger }) {
        WHERE id = ?`
     ).run(nextDisplayName, nextRole, nextActive ? 1 : 0, nowIso(), id);
 
-    if (!nextActive) {
-      destroyUserSessions(db, id);
-      db.prepare("UPDATE conversations SET assignee_id = NULL, updated_at = ? WHERE assignee_id = ?").run(nowIso(), id);
+    if (!nextActive || nextRole === "viewer") {
+      if (!nextActive) destroyUserSessions(db, id);
+      db.prepare(
+        "UPDATE conversations SET assignee_id = NULL, assigned_at = NULL, updated_at = ? WHERE assignee_id = ?"
+      ).run(nowIso(), id);
     }
     audit(db, req.user.id, "user.updated", "user", id, JSON.stringify({
       displayName: nextDisplayName,
@@ -605,21 +621,28 @@ function createApp({ db, config, telegram, whatsapp, broadcaster, logger }) {
     let nextTags = null;
 
     if (hasAssignee) {
+      if (req.user.role !== "admin") {
+        return jsonError(res, 403, "只有管理员可以分配会话");
+      }
       if (body.assigneeId !== null && body.assigneeId !== "") {
         assigneeId = parseId(body.assigneeId);
         if (!assigneeId) return jsonError(res, 400, "客服 ID 不合法");
         const assignee = db.prepare(
-          "SELECT id, active FROM users WHERE id = ?"
+          "SELECT id, active, role FROM users WHERE id = ?"
         ).get(assigneeId);
-        if (!assignee || !assignee.active) return jsonError(res, 400, "客服不存在或已停用");
-      }
-
-      if (req.user.role !== "admin" && assigneeId !== null && assigneeId !== req.user.id) {
-        return jsonError(res, 403, "普通客服只能分配给自己或取消分配");
+        if (!assignee || !assignee.active || !["admin", "agent"].includes(assignee.role)) {
+          return jsonError(res, 400, "客服不存在、已停用或不是客服账号");
+        }
       }
 
       sets.push("assignee_id = ?");
       params.push(assigneeId);
+      if (assigneeId === null) {
+        sets.push("assigned_at = NULL");
+      } else if (assigneeId !== previousAssigneeId) {
+        sets.push("assigned_at = ?");
+        params.push(nowIso());
+      }
     }
 
     let nextStatus = null;

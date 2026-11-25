@@ -5,6 +5,7 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const crypto = require("node:crypto");
+const { DatabaseSync } = require("node:sqlite");
 
 const { openDatabase, bootstrapAdmin } = require("../src/db");
 const { createBroadcaster } = require("../src/realtime");
@@ -321,6 +322,8 @@ test("Telegram support inbox end-to-end API", async t => {
 
   let agent1Cookie;
   let agent2Id;
+  let viewerCookie;
+  let viewerId;
 
   await t.test("admin can create agents", async () => {
     const first = await apiRequest(base, "/api/users", {
@@ -341,17 +344,59 @@ test("Telegram support inbox end-to-end API", async t => {
     agent1Cookie = await login(base, "agent1", "agent-pass-1");
   });
 
-  await t.test("assignment permissions and visibility are enforced", async () => {
+  await t.test("admin can create a read-only viewer account", async () => {
+    const created = await apiRequest(base, "/api/users", {
+      method: "POST",
+      cookie: adminCookie,
+      body: { username: "viewer", displayName: "统计员", password: "viewer-pass-1", role: "viewer" }
+    });
+    assert.equal(created.response.status, 201, JSON.stringify(created.data));
+    assert.equal(created.data.user.role, "viewer");
+    viewerId = created.data.user.id;
+    viewerCookie = await login(base, "viewer", "viewer-pass-1");
+  });
+
+  await t.test("only admins can assign conversations and agents see only their own", async () => {
     const me = await apiRequest(base, "/api/auth/me", { cookie: agent1Cookie });
     assert.equal(me.response.status, 200);
+
+    const hiddenBefore = await apiRequest(base, "/api/conversations?scope=all&status=all", {
+      cookie: agent1Cookie
+    });
+    assert.equal(hiddenBefore.response.status, 200);
+    assert.equal(hiddenBefore.data.total, 0);
+    assert.equal(hiddenBefore.data.counts.all, 0);
+    assert.equal(hiddenBefore.data.counts.unassigned, 0);
+
+    const detailBefore = await apiRequest(base, `/api/conversations/${conversationId}`, {
+      cookie: agent1Cookie
+    });
+    assert.equal(detailBefore.response.status, 404);
 
     const selfAssign = await apiRequest(base, `/api/conversations/${conversationId}`, {
       method: "PATCH",
       cookie: agent1Cookie,
       body: { assigneeId: me.data.user.id }
     });
-    assert.equal(selfAssign.response.status, 200);
-    assert.equal(selfAssign.data.conversation.assigneeId, me.data.user.id);
+    assert.equal(selfAssign.response.status, 404);
+
+    const adminAssign = await apiRequest(base, `/api/conversations/${conversationId}`, {
+      method: "PATCH",
+      cookie: adminCookie,
+      body: { assigneeId: me.data.user.id }
+    });
+    assert.equal(adminAssign.response.status, 200);
+    assert.equal(adminAssign.data.conversation.assigneeId, me.data.user.id);
+    assert.ok(adminAssign.data.conversation.assignedAt);
+
+    const visible = await apiRequest(base, "/api/conversations?scope=all&status=all", {
+      cookie: agent1Cookie
+    });
+    assert.equal(visible.response.status, 200);
+    assert.equal(visible.data.total, 1);
+    assert.equal(visible.data.items[0].assigneeId, me.data.user.id);
+    assert.equal(visible.data.counts.mine, 1);
+    assert.equal(visible.data.counts.unassigned, 0);
 
     const otherAssign = await apiRequest(base, `/api/conversations/${conversationId}`, {
       method: "PATCH",
@@ -360,21 +405,20 @@ test("Telegram support inbox end-to-end API", async t => {
     });
     assert.equal(otherAssign.response.status, 403);
 
-    const adminAssign = await apiRequest(base, `/api/conversations/${conversationId}`, {
+    const adminAssign2 = await apiRequest(base, `/api/conversations/${conversationId}`, {
       method: "PATCH",
       cookie: adminCookie,
       body: { assigneeId: agent2Id }
     });
-    assert.equal(adminAssign.response.status, 200);
-    assert.equal(adminAssign.data.conversation.assigneeId, agent2Id);
+    assert.equal(adminAssign2.response.status, 200);
+    assert.equal(adminAssign2.data.conversation.assigneeId, agent2Id);
 
-    const hiddenList = await apiRequest(base, "/api/conversations?scope=all&status=all", {
+    const hiddenAfter = await apiRequest(base, "/api/conversations?scope=all&status=all", {
       cookie: agent1Cookie
     });
-    assert.equal(hiddenList.response.status, 200);
-    assert.equal(hiddenList.data.total, 0);
-    assert.equal(hiddenList.data.items.length, 0);
-    assert.equal(hiddenList.data.counts.all, 0);
+    assert.equal(hiddenAfter.response.status, 200);
+    assert.equal(hiddenAfter.data.total, 0);
+    assert.equal(hiddenAfter.data.items.length, 0);
 
     for (const [method, path] of [
       ["GET", `/api/conversations/${conversationId}`],
@@ -631,9 +675,45 @@ test("Telegram support inbox end-to-end API", async t => {
     assert.equal(result.data.stats.totals.messagesIn, 2);
     assert.equal(result.data.stats.totals.messagesOut, 3);
     assert.equal(result.data.stats.totals.newConversations, 1);
+    assert.equal(result.data.stats.totals.assigned, 1);
+    assert.equal(result.data.stats.totals.newAssigned, 1);
     const agent = result.data.stats.agents.find(item => item.username === "agent1");
     assert.ok(agent);
+    assert.equal(agent.newConversations, 1);
+    assert.equal(agent.newAssigned, 1);
+    assert.equal(agent.assigned, 1);
     assert.equal(agent.outbound, 1);
+    assert.equal(result.data.stats.agents.some(item => item.username === "viewer"), false);
+  });
+
+  await t.test("viewer role can only read statistics", async () => {
+    const stats = await apiRequest(base, "/api/stats?days=7", { cookie: viewerCookie });
+    assert.equal(stats.response.status, 200);
+    assert.equal(stats.data.stats.totals.conversations, 1);
+
+    for (const path of [
+      "/api/conversations?scope=all&status=all",
+      "/api/users",
+      "/api/canned-replies",
+      "/api/events"
+    ]) {
+      const denied = await apiRequest(base, path, { cookie: viewerCookie });
+      assert.equal(denied.response.status, 403, path);
+    }
+
+    const assign = await apiRequest(base, `/api/conversations/${conversationId}`, {
+      method: "PATCH",
+      cookie: viewerCookie,
+      body: { assigneeId: viewerId }
+    });
+    assert.equal(assign.response.status, 403);
+
+    const viewerAsAssignee = await apiRequest(base, `/api/conversations/${conversationId}`, {
+      method: "PATCH",
+      cookie: adminCookie,
+      body: { assigneeId: viewerId }
+    });
+    assert.equal(viewerAsAssignee.response.status, 400);
   });
 
   await t.test("deactivating an agent releases assigned conversations", async () => {
@@ -658,19 +738,19 @@ test("Telegram support inbox end-to-end API", async t => {
     assert.equal(conversation.data.conversation.assigneeId, null);
   });
 
-  await t.test("agents can see and claim unassigned conversations", async () => {
+  await t.test("unassigned conversations stay hidden until an admin assigns them", async () => {
     const list = await apiRequest(base, "/api/conversations?scope=all&status=all", {
       cookie: agent1Cookie
     });
     assert.equal(list.response.status, 200);
-    assert.equal(list.data.total, 1);
-    assert.equal(list.data.counts.unassigned, 1);
-    assert.equal(list.data.items[0].assigneeId, null);
+    assert.equal(list.data.total, 0);
+    assert.equal(list.data.items.length, 0);
+    assert.equal(list.data.counts.unassigned, 0);
 
     const detail = await apiRequest(base, `/api/conversations/${conversationId}`, {
       cookie: agent1Cookie
     });
-    assert.equal(detail.response.status, 200);
+    assert.equal(detail.response.status, 404);
 
     const me = await apiRequest(base, "/api/auth/me", { cookie: agent1Cookie });
     const claim = await apiRequest(base, `/api/conversations/${conversationId}`, {
@@ -678,8 +758,19 @@ test("Telegram support inbox end-to-end API", async t => {
       cookie: agent1Cookie,
       body: { assigneeId: me.data.user.id }
     });
-    assert.equal(claim.response.status, 200);
-    assert.equal(claim.data.conversation.assigneeId, me.data.user.id);
+    assert.equal(claim.response.status, 404);
+
+    const assign = await apiRequest(base, `/api/conversations/${conversationId}`, {
+      method: "PATCH",
+      cookie: adminCookie,
+      body: { assigneeId: me.data.user.id }
+    });
+    assert.equal(assign.response.status, 200);
+
+    const visible = await apiRequest(base, "/api/conversations?scope=all&status=all", {
+      cookie: agent1Cookie
+    });
+    assert.equal(visible.data.total, 1);
   });
 
   await t.test("auth, CSRF and role checks", async () => {
@@ -814,8 +905,8 @@ test("broadcaster filters events by conversation assignee", () => {
     message: { id: 21 }
   });
   assert.equal(received.admin.length, 1);
-  assert.equal(received.agent1.length, 1);
-  assert.equal(received.agent2.length, 1);
+  assert.equal(received.agent1.length, 0);
+  assert.equal(received.agent2.length, 0);
 
   for (const key of Object.keys(received)) received[key].length = 0;
   broadcaster.broadcastToAgents({ type: "conversation.removed", conversationId: 10 }, 3);
@@ -830,6 +921,81 @@ test("broadcaster filters events by conversation assignee", () => {
   assert.equal(received.agent2.length, 1);
 
   broadcaster.close();
+});
+
+test("legacy databases migrate to viewer roles and assignment timestamps", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "tg-inbox-legacy-"));
+  const dbPath = path.join(tempDir, "legacy.db");
+  const now = new Date().toISOString();
+  const legacy = new DatabaseSync(dbPath);
+  legacy.exec(`
+    CREATE TABLE users (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      username TEXT NOT NULL UNIQUE,
+      display_name TEXT NOT NULL,
+      password_hash TEXT NOT NULL,
+      role TEXT NOT NULL DEFAULT 'agent' CHECK (role IN ('admin', 'agent')),
+      active INTEGER NOT NULL DEFAULT 1,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE TABLE sessions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      token_hash TEXT NOT NULL UNIQUE,
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      expires_at TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    );
+    CREATE TABLE conversations (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      telegram_chat_id TEXT NOT NULL UNIQUE,
+      channel TEXT NOT NULL DEFAULT 'telegram',
+      chat_type TEXT NOT NULL DEFAULT 'private',
+      title TEXT NOT NULL,
+      username TEXT,
+      status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'pending', 'closed')),
+      assignee_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+      last_message_at TEXT,
+      last_message_preview TEXT,
+      last_message_direction TEXT,
+      unread_count INTEGER NOT NULL DEFAULT 0,
+      notes TEXT NOT NULL DEFAULT '',
+      tags_json TEXT NOT NULL DEFAULT '[]',
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    INSERT INTO users
+      (id, username, display_name, password_hash, role, active, created_at, updated_at)
+    VALUES (1, 'admin', '管理员', 'x', 'admin', 1, '${now}', '${now}');
+    INSERT INTO sessions (token_hash, user_id, expires_at, created_at)
+    VALUES ('legacy-token', 1, '${new Date(Date.now() + 86400000).toISOString()}', '${now}');
+    INSERT INTO conversations
+      (id, telegram_chat_id, title, assignee_id, last_message_at, created_at, updated_at)
+    VALUES (1, '555', 'Alice', 1, '${now}', '${now}', '${now}');
+  `);
+  legacy.close();
+
+  const db = openDatabase(dbPath);
+  try {
+    assert.equal(db.prepare("SELECT COUNT(*) AS c FROM sessions").get().c, 1);
+    assert.deepEqual(db.prepare("PRAGMA foreign_key_check").all(), []);
+    db.prepare(
+      `INSERT INTO users (username, display_name, password_hash, role, active, created_at, updated_at)
+       VALUES ('viewer', '统计员', 'x', 'viewer', 1, ?, ?)`
+    ).run(now, now);
+    assert.equal(db.prepare("SELECT role FROM users WHERE username = 'viewer'").get().role, "viewer");
+    assert.equal(
+      db.prepare("SELECT assigned_at FROM conversations WHERE id = 1").get().assigned_at,
+      now
+    );
+    assert.match(
+      db.prepare("SELECT sql FROM sqlite_master WHERE name = 'users'").get().sql,
+      /viewer/
+    );
+  } finally {
+    db.close();
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
 });
 
 test("WhatsApp Cloud API adapter", async t => {

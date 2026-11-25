@@ -83,6 +83,19 @@
           <button class="status-tab" type="button" data-status="all">全部</button>
         </div>
 
+        <section class="sidebar-stats" id="sidebarStats" aria-label="今日客服统计">
+          <div class="sidebar-stats-head">
+            <span>今日统计</span>
+            <span id="sidebarStatsHint">全团队</span>
+          </div>
+          <div class="sidebar-stats-grid">
+            <div><strong id="sidebarIncoming">0</strong><span>进人</span></div>
+            <div><strong id="sidebarActive">0</strong><span>接待</span></div>
+            <div><strong id="sidebarUnread">0</strong><span>未读</span></div>
+          </div>
+          <div id="sidebarAgentRows" class="sidebar-agent-rows"></div>
+        </section>
+
         <div id="conversationList" class="conversation-list"></div>
         <div id="listEmpty" class="list-empty" hidden>
           <div class="empty-icon">💬</div>
@@ -184,6 +197,71 @@
     </div>
   </section>
 
+  <section id="viewerView" class="viewer-view" hidden>
+    <header class="topbar">
+      <div class="brand">
+        <div class="brand-mark small">CS</div>
+        <div class="brand-text">
+          <strong>客服统计</strong>
+          <span>只读数据看板</span>
+        </div>
+      </div>
+      <div class="topbar-right">
+        <span id="viewerUser" class="current-user"></span>
+        <button id="viewerRefresh" class="ghost" type="button">刷新</button>
+        <button id="viewerPasswordBtn" class="ghost" type="button">修改密码</button>
+        <button id="viewerLogoutBtn" class="ghost" type="button">退出</button>
+      </div>
+    </header>
+
+    <main class="viewer-main">
+      <div class="viewer-head">
+        <div>
+          <h1>客服进人与接待统计</h1>
+          <p id="viewerSubtitle">只读统计账号 · 不显示客户会话内容。</p>
+        </div>
+        <label class="viewer-range">
+          统计范围
+          <select id="viewerRange" aria-label="统计范围">
+            <option value="1">今日</option>
+            <option value="7">最近 7 天</option>
+            <option value="14">最近 14 天</option>
+            <option value="30">最近 30 天</option>
+          </select>
+        </label>
+      </div>
+
+      <div id="viewerCards" class="stats-cards"></div>
+
+      <section class="stats-section viewer-table-section">
+        <div class="stats-section-head">
+          <div class="section-label">客服明细</div>
+          <span class="viewer-table-hint">进人按会话创建时间统计，新分配按管理员分配时间统计</span>
+        </div>
+        <div class="stats-table-wrap">
+          <table class="stats-table">
+            <thead>
+              <tr>
+                <th>客服</th>
+                <th>进人</th>
+                <th>新分配</th>
+                <th>当前接待</th>
+                <th>待处理</th>
+                <th>跟进中</th>
+                <th>已关闭</th>
+                <th>未读</th>
+                <th>发出消息</th>
+              </tr>
+            </thead>
+            <tbody id="viewerAgentRows"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <p class="viewer-note">此账号只能查看统计数据，不能查看客户会话、消息或修改任何分配。</p>
+    </main>
+  </section>
+
   <div id="toast" class="toast" hidden></div>
 
   <div id="teamModal" class="modal" hidden>
@@ -220,6 +298,7 @@
             角色
             <select id="newRole" name="role">
               <option value="agent">客服</option>
+              <option value="viewer">统计员（只读）</option>
               <option value="admin">管理员</option>
             </select>
           </label>
@@ -239,6 +318,7 @@
         </div>
         <div class="stats-head-actions">
           <select id="statsRange" aria-label="统计范围">
+            <option value="1">今日</option>
             <option value="7">最近 7 天</option>
             <option value="14">最近 14 天</option>
             <option value="30">最近 30 天</option>
@@ -267,10 +347,13 @@
             <thead>
               <tr>
                 <th>客服</th>
-                <th>负责会话</th>
+                <th>进人</th>
+                <th>新分配</th>
+                <th>当前接待</th>
                 <th>待处理</th>
                 <th>跟进中</th>
                 <th>已关闭</th>
+                <th>未读</th>
                 <th>发出消息</th>
               </tr>
             </thead>

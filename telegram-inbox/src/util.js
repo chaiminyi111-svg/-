@@ -134,6 +134,7 @@ function toConversationSummary(row) {
     assigneeId: row.assignee_id,
     assigneeName: row.assignee_display_name || "",
     assigneeUsername: row.assignee_username || "",
+    assignedAt: row.assigned_at || null,
     lastMessageAt: row.last_message_at,
     lastMessagePreview: row.last_message_preview || "",
     lastMessageDirection: row.last_message_direction || "",

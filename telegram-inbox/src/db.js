@@ -10,7 +10,7 @@ CREATE TABLE IF NOT EXISTS users (
   username TEXT NOT NULL UNIQUE,
   display_name TEXT NOT NULL,
   password_hash TEXT NOT NULL,
-  role TEXT NOT NULL DEFAULT 'agent' CHECK (role IN ('admin', 'agent')),
+  role TEXT NOT NULL DEFAULT 'agent' CHECK (role IN ('admin', 'agent', 'viewer')),
   active INTEGER NOT NULL DEFAULT 1,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
@@ -34,6 +34,7 @@ CREATE TABLE IF NOT EXISTS conversations (
   username TEXT,
   status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'pending', 'closed')),
   assignee_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  assigned_at TEXT,
   last_message_at TEXT,
   last_message_preview TEXT,
   last_message_direction TEXT,
@@ -105,10 +106,58 @@ function openDatabase(dbPath) {
   db.exec("PRAGMA foreign_keys = ON;");
   db.exec("PRAGMA busy_timeout = 5000;");
   db.exec(SCHEMA);
+  migrateUserRoles(db);
   ensureColumn(db, "conversations", "channel", "TEXT NOT NULL DEFAULT 'telegram'");
   ensureColumn(db, "conversations", "notes", "TEXT NOT NULL DEFAULT ''");
   ensureColumn(db, "conversations", "tags_json", "TEXT NOT NULL DEFAULT '[]'");
+  ensureColumn(db, "conversations", "assigned_at", "TEXT");
+  db.exec(`
+    UPDATE conversations
+    SET assigned_at = COALESCE(last_message_at, created_at, updated_at)
+    WHERE assignee_id IS NOT NULL AND assigned_at IS NULL
+  `);
   return db;
+}
+
+function migrateUserRoles(db) {
+  const table = db.prepare(
+    "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'users'"
+  ).get();
+  if (!table?.sql || table.sql.includes("'viewer'")) return;
+
+  db.exec("PRAGMA foreign_keys = OFF;");
+  try {
+    db.exec("BEGIN IMMEDIATE;");
+    db.exec("DROP TABLE IF EXISTS users_migrated;");
+    db.exec(`
+      CREATE TABLE users_migrated (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        username TEXT NOT NULL UNIQUE,
+        display_name TEXT NOT NULL,
+        password_hash TEXT NOT NULL,
+        role TEXT NOT NULL DEFAULT 'agent' CHECK (role IN ('admin', 'agent', 'viewer')),
+        active INTEGER NOT NULL DEFAULT 1,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      )
+    `);
+    db.exec(`
+      INSERT INTO users_migrated
+        (id, username, display_name, password_hash, role, active, created_at, updated_at)
+      SELECT id, username, display_name, password_hash, role, active, created_at, updated_at
+      FROM users
+    `);
+    db.exec("DROP TABLE users;");
+    db.exec("ALTER TABLE users_migrated RENAME TO users;");
+    db.exec("COMMIT;");
+  } catch (error) {
+    try {
+      db.exec("ROLLBACK;");
+    } catch {}
+    throw error;
+  } finally {
+    db.exec("PRAGMA foreign_keys = ON;");
+  }
 }
 
 function ensureColumn(db, table, column, definition) {

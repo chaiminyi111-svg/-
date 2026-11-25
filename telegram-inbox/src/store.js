@@ -29,7 +29,7 @@ function listConversations(db, options) {
   const params = [];
 
   if (options.isAdmin === false) {
-    where.push("(c.assignee_id = ? OR c.assignee_id IS NULL)");
+    where.push("c.assignee_id = ?");
     params.push(options.userId);
   }
 
@@ -73,7 +73,7 @@ function listConversations(db, options) {
 }
 
 function getConversationCounts(db, options = {}) {
-  const where = options.isAdmin === false ? " WHERE (assignee_id = ? OR assignee_id IS NULL)" : "";
+  const where = options.isAdmin === false ? " WHERE assignee_id = ?" : "";
   const params = options.isAdmin === false ? [options.userId] : [];
   const row = db.prepare(
     `SELECT COUNT(*) AS total,
@@ -140,6 +140,17 @@ function getStats(db, days = 7) {
   const newConversations = Number(
     db.prepare("SELECT COUNT(*) AS c FROM conversations WHERE created_at >= ?").get(startIso).c
   );
+  const assignedTotals = db.prepare(
+    `SELECT COUNT(*) AS assigned,
+            COALESCE(SUM(unread_count), 0) AS unread
+     FROM conversations WHERE assignee_id IS NOT NULL`
+  ).get();
+  const newAssigned = Number(
+    db.prepare(
+      `SELECT COUNT(*) AS c FROM conversations
+       WHERE assignee_id IS NOT NULL AND assigned_at >= ?`
+    ).get(startIso).c
+  );
 
   const dailyRows = db.prepare(
     `SELECT substr(created_at, 1, 10) AS day,
@@ -190,21 +201,30 @@ function getStats(db, days = 7) {
             COUNT(c.id) AS assigned,
             SUM(CASE WHEN c.status = 'open' THEN 1 ELSE 0 END) AS open,
             SUM(CASE WHEN c.status = 'pending' THEN 1 ELSE 0 END) AS pending,
-            SUM(CASE WHEN c.status = 'closed' THEN 1 ELSE 0 END) AS closed
+            SUM(CASE WHEN c.status = 'closed' THEN 1 ELSE 0 END) AS closed,
+            (SELECT COUNT(*) FROM conversations n
+             WHERE n.assignee_id = u.id AND n.created_at >= ?) AS new_conversations,
+            (SELECT COUNT(*) FROM conversations a
+             WHERE a.assignee_id = u.id AND a.assigned_at >= ?) AS new_assigned,
+            (SELECT COALESCE(SUM(r.unread_count), 0) FROM conversations r
+             WHERE r.assignee_id = u.id) AS unread
      FROM users u
      LEFT JOIN conversations c ON c.assignee_id = u.id
-     WHERE u.active = 1
+     WHERE u.active = 1 AND u.role IN ('admin', 'agent')
      GROUP BY u.id
      ORDER BY assigned DESC, u.display_name ASC`
-  ).all().map(row => ({
+  ).all(startIso, startIso).map(row => ({
     id: row.id,
     username: row.username,
     displayName: row.display_name,
     role: row.role,
+    newConversations: Number(row.new_conversations || 0),
+    newAssigned: Number(row.new_assigned || 0),
     assigned: Number(row.assigned || 0),
     open: Number(row.open || 0),
     pending: Number(row.pending || 0),
     closed: Number(row.closed || 0),
+    unread: Number(row.unread || 0),
     outbound: outboundByAgent.get(row.id) || 0
   }));
 
@@ -218,9 +238,12 @@ function getStats(db, days = 7) {
       pending: counts.pending,
       closed: counts.closed,
       unassigned: counts.unassigned,
+      assigned: Number(assignedTotals.assigned || 0),
+      unread: Number(assignedTotals.unread || 0),
       messagesIn: Number(messageTotals.inbound || 0),
       messagesOut: Number(messageTotals.outbound || 0),
       newConversations,
+      newAssigned,
       activeAgents: agents.length
     },
     daily,
