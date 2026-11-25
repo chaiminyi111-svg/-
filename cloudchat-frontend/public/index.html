@@ -1,0 +1,236 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>云聊 CloudChat · 私人办公通讯</title>
+  <meta name="description" content="云聊 CloudChat 是私有部署的办公通讯工具，支持群聊、语音、图片、文件、红包和音视频通话。">
+  <meta name="keywords" content="云聊,CloudChat,即时通讯,办公聊天,群聊,音视频通话">
+  <meta name="author" content="CloudChat">
+  <meta name="theme-color" content="#07c160">
+  <meta name="color-scheme" content="light">
+  <meta name="application-name" content="云聊 CloudChat">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="云聊">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <meta property="og:type" content="website">
+  <meta property="og:url" content="https://chat.biegege.cc.cd/">
+  <meta property="og:site_name" content="云聊 CloudChat">
+  <meta property="og:title" content="云聊 CloudChat · 私人办公通讯">
+  <meta property="og:description" content="支持群聊、语音、图片、文件、红包和音视频通话的私人办公通讯工具。">
+  <meta property="og:image" content="https://chat.biegege.cc.cd/icon-512.png">
+  <meta name="twitter:card" content="summary">
+  <meta name="twitter:title" content="云聊 CloudChat · 私人办公通讯">
+  <meta name="twitter:description" content="支持群聊、语音、图片、文件、红包和音视频通话的私人办公通讯工具。">
+  <meta name="twitter:image" content="https://chat.biegege.cc.cd/icon-512.png">
+  <link rel="canonical" href="https://chat.biegege.cc.cd/">
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png">
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<div id="app">
+  <header class="top"><div class="brand"><div class="logo" aria-hidden="true">C</div><div class="brand-text"><b>云聊 <span class="brand-en">CloudChat</span></b><small>私人办公通讯</small></div></div><div id="userbar"></div></header>
+  <main id="main">
+    <section class="auth card" id="auth">
+      <div class="tabs"><button class="active" data-tab="login">登录</button><button data-tab="register">邀请码注册</button></div>
+      <form id="loginForm"><h2>欢迎回来</h2><label>用户名<input name="username" required autocomplete="username"></label><label>密码<span class="password-wrap"><input name="password" type="password" required autocomplete="current-password"><button type="button" class="password-toggle" data-toggle-password aria-label="显示密码" title="显示密码">👁</button></span></label><button class="primary">登录</button></form>
+      <form id="registerForm" hidden><h2>创建账号</h2><label>邀请码<input name="invite" required></label><label>用户名<input name="username" required minlength="3" maxlength="24"></label><label>昵称<input name="displayName"></label><label>密码<span class="password-wrap"><input name="password" type="password" required minlength="10"><button type="button" class="password-toggle" data-toggle-password aria-label="显示密码" title="显示密码">👁</button></span></label><button class="primary">使用邀请码注册</button></form>
+      
+      <p class="notice">本平台为独立聊天服务。消息会保存在服务器以提供跨设备同步；管理员按授权和审计规则可查看聊天记录。</p>
+      <div id="authMsg" class="message"></div>
+    </section>
+    <section id="chat" hidden class="chat-shell">
+      <aside class="sidebar">
+        <div class="side-head"><b>消息</b><button id="newContact">＋ 添加好友</button></div>
+        <div id="contactList" class="contact-list"></div>
+        <div class="side-foot"><button id="profileBtn">我的资料</button><button id="adminBtn" hidden>管理后台</button><button id="logoutBtn">退出</button></div>
+      </aside>
+      <section class="conversation">
+        <div class="conv-head">
+  <button id="mobileBackBtn" type="button" aria-label="返回会话列表">‹</button>
+  <span id="convTitle">选择联系人开始聊天</span>
+          <div id="callActions" class="call-actions" hidden>
+            <button id="audioCallBtn" type="button" title="语音通话">语音</button>
+            <button id="videoCallBtn" type="button" title="视频通话">视频</button>
+          </div>
+  <button id="clearChatBtn" type="button" disabled>清空聊天记录</button>
+</div>
+        <div class="messages" id="messages"></div>
+        <div id="typingIndicator" class="typing-indicator" hidden>对方正在输入…</div>
+        <form id="sendForm" class="composer"><input id="messageInput" placeholder="输入消息..." autocomplete="off" disabled><button id="sendButton" class="primary" disabled>发送</button><button id="imageButton" type="button" title="发送图片">图片</button><input id="imageFileInput" type="file" accept="image/jpeg,image/png,image/webp,image/gif" hidden><button id="fileButton" type="button" title="发送文件">文件</button><input id="fileFileInput" type="file" hidden><button id="voiceButton" type="button" title="按住说话">按住说话</button></form>
+      </section>
+    </section>
+    <section id="adminPanel" hidden class="card admin">
+  <header class="admin-header">
+    <div>
+      <div class="admin-eyebrow">CLOUDCHAT CONTROL CENTER</div>
+      <h2>管理中心</h2>
+      <p>管理账户、注册邀请码和安全操作记录</p>
+    </div>
+    <button id="backChat" type="button" class="admin-back">返回聊天</button>
+  </header>
+
+  <nav class="admin-nav" aria-label="管理功能">
+    <button type="button" class="admin-tab active" data-admin-view="users">用户管理</button>
+    <button type="button" class="admin-tab" data-admin-view="invites">邀请码管理</button>
+    <button type="button" class="admin-tab" data-admin-view="audit">安全审计</button>
+  </nav>
+
+  <section class="admin-view" id="adminUsersView">
+    <div class="admin-section-head">
+      <div>
+        <h3>用户管理</h3>
+        <p>查看注册账户和账户状态</p>
+      </div>
+      <button type="button" id="loadUsers" class="admin-secondary">刷新列表</button>
+    </div>
+    <div class="admin-table-wrap">
+      <table class="admin-table">
+        <thead>
+          <tr>
+            <th>账户名</th>
+            <th>昵称</th>
+            <th>注册时间</th>
+            <th>红包余额</th>
+            <th>账户状态</th>
+            <th>管理操作</th>
+          </tr>
+        </thead>
+        <tbody id="adminUsersBody">
+          <tr><td colspan="6" class="admin-empty">点击刷新列表加载用户</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div id="adminUsersCount" class="admin-footnote"></div>
+  </section>
+
+  <section class="admin-view" id="adminInvitesView" hidden>
+    <div class="admin-section-head">
+      <div>
+        <h3>邀请码管理</h3>
+        <p>生成一次性注册邀请码，默认有效期为 72 小时</p>
+      </div>
+      <button type="button" id="makeInvite" class="primary admin-primary">生成邀请码</button>
+    </div>
+    <div id="adminInviteResult" class="admin-invite-result">
+      <div class="admin-empty">生成的邀请码会显示在这里</div>
+    </div>
+    <div class="admin-tip">邀请码只能使用一次。请妥善保管并发送给需要注册的人。</div>
+  </section>
+
+  <section class="admin-view" id="adminAuditView" hidden>
+    <div class="admin-section-head">
+      <div>
+        <h3>安全审计</h3>
+        <p>按管理员、操作类型、目标用户和时间查询管理员操作记录</p>
+      </div>
+      <button type="button" id="loadAudit" class="admin-secondary">刷新日志</button>
+    </div>
+
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;margin:14px 0;padding:14px;border:1px solid var(--border,#ddd);border-radius:10px;">
+      <label style="display:grid;gap:6px;">管理员账号 / 昵称 / ID
+        <input id="auditAdminFilter" type="text" placeholder="输入管理员关键字">
+      </label>
+      <label style="display:grid;gap:6px;">操作类型
+        <select id="auditActionFilter">
+          <option value="">全部操作</option>
+          <option value="VIEW_CHAT_HISTORY">查看聊天记录</option>
+          <option value="VIEW_USER_CONVERSATIONS">查看用户会话</option>
+          <option value="VIEW_CHAT_ATTACHMENT">查看聊天附件</option>
+          <option value="UPDATE_NICKNAME">修改用户昵称</option>
+          <option value="RESET_PASSWORD">重置用户密码</option>
+          <option value="SUSPEND_USER">停用账户</option>
+          <option value="ACTIVATE_USER">恢复账户</option>
+          <option value="ANONYMIZE_USER">注销账户</option>
+          <option value="DELETE_USER">删除用户</option>
+          <option value="CREATE_INVITE">生成邀请码</option>
+          <option value="SUSPEND_USER_FAILED">停用账户失败</option>
+          <option value="ACTIVATE_USER_FAILED">恢复账户失败</option>
+          <option value="UPDATE_NICKNAME_FAILED">修改用户昵称失败</option>
+          <option value="RESET_PASSWORD_FAILED">重置用户密码失败</option>
+          <option value="ANONYMIZE_USER_FAILED">注销账户失败</option>
+        </select>
+      </label>
+      <label style="display:grid;gap:6px;">目标用户 / ID
+        <input id="auditTargetFilter" type="text" placeholder="输入目标用户关键字">
+      </label>
+      <label style="display:grid;gap:6px;">开始日期
+        <input id="auditStartDate" type="date">
+      </label>
+      <label style="display:grid;gap:6px;">结束日期
+        <input id="auditEndDate" type="date">
+      </label>
+    </div>
+
+    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px;">
+      <button type="button" id="filterAudit" class="primary">筛选记录</button>
+      <button type="button" id="resetAudit" class="admin-secondary">重置条件</button>
+    </div>
+
+    <div class="admin-footnote" id="auditResultCount" style="margin-bottom:8px;">等待加载审计记录</div>
+
+    <div class="admin-table-wrap">
+      <table class="admin-table">
+        <thead>
+          <tr>
+            <th>操作管理员</th>
+            <th>操作内容</th>
+            <th>目标 ID</th>
+            <th>记录详情</th>
+            <th>操作时间</th>
+          </tr>
+        </thead>
+        <tbody id="adminAuditBody">
+          <tr><td colspan="5" class="admin-empty">点击刷新日志加载记录</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <div id="adminNotice" class="admin-notice" role="status" aria-live="polite"></div>
+</section>
+  
+    <div id="addFriendModal" class="group-modal" hidden>
+      <section class="group-dialog add-friend-dialog" role="dialog" aria-modal="true" aria-labelledby="addFriendTitle">
+        <div class="add-friend-heading">
+          <div>
+            <h3 id="addFriendTitle">添加好友</h3>
+            <p>输入对方的用户名，发送好友申请</p>
+          </div>
+          <button id="closeAddFriend" type="button" class="add-friend-close" aria-label="关闭">×</button>
+        </div>
+        <form id="addFriendForm">
+          <label for="addFriendUsername">好友用户名</label>
+          <input id="addFriendUsername" name="username" maxlength="24" autocomplete="off" placeholder="请输入用户名" required>
+          <div id="addFriendError" class="group-modal-error" role="status"></div>
+          <div class="group-modal-actions">
+            <button id="cancelAddFriend" type="button" class="admin-secondary">取消</button>
+            <button id="submitAddFriend" type="submit" class="primary">发送申请</button>
+          </div>
+        </form>
+      </section>
+    </div>
+
+  </main>
+</div>
+<script src="/app.js"></script>
+<script>
+(function () {
+  var BASE = "云聊 CloudChat";
+  function updateTitle() {
+    var total = 0;
+    document.querySelectorAll(".unread-badge").forEach(function (el) {
+      var n = parseInt(el.textContent, 10);
+      if (!isNaN(n)) total += n;
+    });
+    document.title = total > 0
+      ? "(" + (total > 99 ? "99+" : total) + ") " + BASE
+      : BASE + " · 私人办公通讯";
+  }
+  new MutationObserver(updateTitle).observe(document.body, { subtree: true, childList: true, characterData: true });
+  updateTitle();
+})();
+</script>
+</body></html>
