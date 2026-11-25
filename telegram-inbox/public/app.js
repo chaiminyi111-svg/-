@@ -1,6 +1,21 @@
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
 
+const FALLBACK_LANGUAGES = [
+  ["zh-CN", "中文（简体）"], ["zh-TW", "中文（繁體）"], ["en", "English"],
+  ["ja", "日本語"], ["ko", "한국어"], ["es", "Español"], ["fr", "Français"],
+  ["de", "Deutsch"], ["ru", "Русский"], ["pt", "Português"], ["ar", "العربية"],
+  ["th", "ไทย"], ["vi", "Tiếng Việt"], ["id", "Bahasa Indonesia"],
+  ["it", "Italiano"], ["tr", "Türkçe"], ["hi", "हिन्दी"]
+];
+const LANGUAGE_LABELS = Object.fromEntries(FALLBACK_LANGUAGES);
+
+function languageName(code) {
+  if (!code) return "";
+  const normalized = String(code).replace("_", "-");
+  return LANGUAGE_LABELS[normalized] || LANGUAGE_LABELS[normalized.split("-")[0]] || normalized;
+}
+
 const state = {
   me: null,
   users: [],
@@ -21,7 +36,10 @@ const state = {
   sidebarStats: null,
   sidebarTimer: null,
   viewerDays: 1,
-  channels: { telegram: null, whatsapp: null },
+  translate: { configured: false, source: "none", languages: [], defaultTarget: "zh-CN" },
+  replyLanguages: {},
+  assignment: { enabled: false, strategy: "least_active", maxActive: 0 },
+  channels: { telegram: null, whatsapp: null, translate: null },
   telegramConfigured: false,
   whatsappConfigured: false,
   eventSource: null,
@@ -137,6 +155,7 @@ async function enterInbox() {
   }
   showInbox();
   await loadUsers();
+  await loadTranslateConfig();
   await loadConversations();
   await loadSidebarStats();
   connectRealtime();
@@ -212,7 +231,9 @@ function showLogin() {
   state.stats = null;
   state.sidebarStats = null;
   state.viewerDays = 1;
-  state.channels = { telegram: null, whatsapp: null };
+  state.translate = { configured: false, source: "none", languages: [], defaultTarget: "zh-CN" };
+  state.replyLanguages = {};
+  state.channels = { telegram: null, whatsapp: null, translate: null };
   state.cannedReplies = [];
   state.editingCannedId = null;
   state.customerTags = [];
@@ -226,6 +247,20 @@ function showLogin() {
 async function loadUsers() {
   const data = await api(`/api/users${state.me.role === "admin" ? "?includeInactive=1" : ""}`);
   state.users = data.users.filter(user => user.active);
+  if (state.active) renderChatHeader();
+}
+
+async function loadTranslateConfig() {
+  if (!state.me || state.me.role === "viewer") return;
+  try {
+    const data = await api("/api/translate/config");
+    state.translate = data.translate || state.translate;
+    for (const item of state.translate.languages || []) {
+      if (item?.code) LANGUAGE_LABELS[item.code] = item.label || item.code;
+    }
+  } catch {
+    state.translate = { configured: false, source: "none", languages: [], defaultTarget: "zh-CN" };
+  }
   if (state.active) renderChatHeader();
 }
 
@@ -570,6 +605,7 @@ function buildMessageRow(message) {
   const bubble = document.createElement("div");
   bubble.className = "bubble";
   appendMessageContent(bubble, message);
+  appendTranslationNote(bubble, message);
 
   const time = document.createElement("div");
   time.className = "message-time";
@@ -673,6 +709,31 @@ function appendCaption(bubble, text) {
   bubble.appendChild(caption);
 }
 
+function appendTranslationNote(bubble, message) {
+  const meta = message.meta || {};
+  if (message.translatedBody) {
+    const note = document.createElement("div");
+    note.className = "message-translation";
+    const label = document.createElement("span");
+    label.className = "message-translation-label";
+    label.textContent = `译文 · ${languageName(message.translationLanguage)}`;
+    const text = document.createElement("p");
+    text.textContent = message.translatedBody;
+    note.append(label, text);
+    bubble.appendChild(note);
+  } else if (message.direction === "out" && meta.translated && meta.originalText) {
+    const note = document.createElement("div");
+    note.className = "message-translation out";
+    const label = document.createElement("span");
+    label.className = "message-translation-label";
+    label.textContent = `原文 · ${languageName(meta.sourceLanguage)}`;
+    const text = document.createElement("p");
+    text.textContent = meta.originalText;
+    note.append(label, text);
+    bubble.appendChild(note);
+  }
+}
+
 function renderChatHeader() {
   const conversation = state.active;
   if (!conversation) {
@@ -696,10 +757,52 @@ function renderChatHeader() {
     (conversation.username ? "@" + conversation.username + " · " : "") +
     typeLabel + " · ID " + displayId;
 
+  const language = $("#chatLanguage");
+  if (conversation.detectedLanguage) {
+    language.hidden = false;
+    language.textContent = `客户语言：${languageName(conversation.detectedLanguage)}`;
+  } else {
+    language.hidden = true;
+    language.textContent = "";
+  }
+
   $("#statusSelect").value = conversation.status;
   renderAssigneeOptions(conversation);
+  renderReplyLanguageOptions(conversation);
   renderTelegramState();
   renderCustomerPanel();
+}
+
+function renderReplyLanguageOptions(conversation) {
+  const wrap = $("#replyLanguageWrap");
+  const select = $("#replyLanguage");
+  const hint = $("#translateHint");
+  const configured = Boolean(state.translate?.configured);
+  if (!wrap || !select) return;
+  wrap.hidden = !configured;
+  hint.hidden = configured;
+  if (!configured) return;
+
+  const detected = conversation.detectedLanguage;
+  const previous = state.replyLanguages[conversation.id] || "auto";
+  select.replaceChildren();
+
+  const auto = document.createElement("option");
+  auto.value = "auto";
+  auto.textContent = detected ? `跟随客户（${languageName(detected)}）` : "跟随客户（自动识别）";
+  select.appendChild(auto);
+
+  const languages = (state.translate.languages || []).length
+    ? state.translate.languages
+    : FALLBACK_LANGUAGES.map(([code, label]) => ({ code, label }));
+  for (const item of languages) {
+    const option = document.createElement("option");
+    option.value = item.code;
+    option.textContent = item.label;
+    select.appendChild(option);
+  }
+  select.value = [...select.options].some(option => option.value === previous) ? previous : "auto";
+  select.disabled = state.sending || state.uploading;
 }
 
 function renderAssigneeOptions(conversation) {
@@ -980,9 +1083,12 @@ async function sendMessage() {
   button.textContent = "发送中…";
 
   try {
+    const targetLanguage = state.translate?.configured
+      ? ($("#replyLanguage")?.value || "auto")
+      : "auto";
     const data = await api(`/api/conversations/${state.active.id}/messages`, {
       method: "POST",
-      body: { text }
+      body: { text, targetLanguage }
     });
 
     if (state.activeId === data.conversation.id) {
@@ -1169,6 +1275,19 @@ function rangeLabel(days) {
   return Number(days) === 1 ? "今日" : `最近 ${days} 天`;
 }
 
+function formatMinutes(value) {
+  if (value === null || value === undefined || value === "") return "—";
+  const minutes = Number(value);
+  if (!Number.isFinite(minutes)) return "—";
+  if (minutes < 60) return `${minutes < 10 ? minutes.toFixed(1) : Math.round(minutes)} 分钟`;
+  return `${(minutes / 60).toFixed(1)} 小时`;
+}
+
+function exportStatsCsv() {
+  const days = state.stats?.rangeDays || state.viewerDays || 7;
+  window.location.assign(`/api/stats/export.csv?days=${encodeURIComponent(days)}`);
+}
+
 function renderStats() {
   const stats = state.stats;
   if (!stats) return;
@@ -1182,7 +1301,10 @@ function renderStats() {
     ["收到消息", totals.messagesIn, "客户发来"],
     ["发出消息", totals.messagesOut, "客服回复"],
     ["待处理", totals.open, "需要跟进"],
-    ["未分配", totals.unassigned, "等待分配"]
+    ["未分配", totals.unassigned, "等待分配"],
+    ["平均首响", formatMinutes(totals.avgFirstResponseMinutes), `SLA ${totals.slaTargetMinutes || 15} 分钟`],
+    ["平均解决", formatMinutes(totals.avgResolutionMinutes), "已关闭会话"],
+    ["SLA 超时", totals.slaBreaches, "需要优先处理"]
   ];
 
   for (const cardBox of [$("#statsCards"), $("#viewerCards")]) {
@@ -1194,7 +1316,7 @@ function renderStats() {
       const name = document.createElement("span");
       name.textContent = label;
       const number = document.createElement("strong");
-      number.textContent = Number(value || 0).toLocaleString("zh-CN");
+      number.textContent = typeof value === "string" ? value : Number(value || 0).toLocaleString("zh-CN");
       const note = document.createElement("small");
       note.textContent = hint;
       item.append(name, number, note);
@@ -1237,7 +1359,7 @@ function renderStats() {
     if (!stats.agents.length) {
       const row = document.createElement("tr");
       const cell = document.createElement("td");
-      cell.colSpan = 9;
+      cell.colSpan = 12;
       cell.className = "stats-empty";
       cell.textContent = "暂无客服数据";
       row.appendChild(cell);
@@ -1262,12 +1384,15 @@ function renderStats() {
         agent.pending,
         agent.closed,
         agent.unread,
-        agent.outbound
+        agent.outbound,
+        formatMinutes(agent.avgFirstResponseMinutes),
+        formatMinutes(agent.avgResolutionMinutes),
+        agent.slaBreaches
       ];
       row.appendChild(nameCell);
       for (const value of values) {
         const cell = document.createElement("td");
-        cell.textContent = Number(value || 0).toLocaleString("zh-CN");
+        cell.textContent = typeof value === "string" ? value : Number(value || 0).toLocaleString("zh-CN");
         row.appendChild(cell);
       }
       tbody.appendChild(row);
@@ -1601,15 +1726,36 @@ function renderWhatsAppSettings() {
   $("#whatsappWebhookUrl").textContent = location.origin + "/webhook/whatsapp";
 }
 
+function renderTranslateSettings() {
+  const settings = state.channels.translate || state.translate || {};
+  const configured = Boolean(settings.configured);
+  $("#translateDot").className = "channel-dot " + (configured ? "on" : "off");
+  let text;
+  if (!configured) {
+    text = "未配置，填写 Google Cloud Translation API Key 后启用";
+  } else {
+    text = "已启用，会自动识别客户语言并翻译外文消息";
+    if (settings.source === "environment") text += " · 来自环境变量";
+    else if (settings.source === "database") text += " · 已保存到服务器";
+  }
+  $("#translateStatusText").textContent = text;
+  $("#translateClearBtn").hidden = !configured || settings.source === "environment";
+  $("#translateKeyInput").placeholder = configured
+    ? "已配置，留空保持不变"
+    : "AIza...（需要启用 Cloud Translation API）";
+}
+
 function renderChannelSettings() {
   renderTelegramSettings();
   renderWhatsAppSettings();
+  renderTranslateSettings();
 }
 
 async function loadChannelSettings() {
-  const [telegramResult, whatsappResult] = await Promise.allSettled([
+  const [telegramResult, whatsappResult, translateResult] = await Promise.allSettled([
     api("/api/admin/telegram"),
-    api("/api/admin/whatsapp")
+    api("/api/admin/whatsapp"),
+    api("/api/admin/translate")
   ]);
 
   if (telegramResult.status === "fulfilled") {
@@ -1630,6 +1776,15 @@ async function loadChannelSettings() {
     $("#whatsappStatusText").textContent = "读取配置失败";
   }
 
+  if (translateResult.status === "fulfilled") {
+    state.channels.translate = translateResult.value.translate;
+    state.translate = { ...state.translate, ...translateResult.value.translate };
+  } else {
+    setChannelError("translateError", translateResult.reason.message);
+    $("#translateDot").className = "channel-dot off";
+    $("#translateStatusText").textContent = "读取配置失败";
+  }
+
   renderChannelSettings();
   renderTelegramState();
 }
@@ -1642,14 +1797,19 @@ async function openChannelsModal() {
   $("#whatsappPhoneInput").value = "";
   $("#whatsappVerifyInput").value = "";
   $("#whatsappSecretInput").value = "";
+  $("#translateKeyInput").value = "";
   $("#telegramClearBtn").hidden = true;
   $("#whatsappClearBtn").hidden = true;
+  $("#translateClearBtn").hidden = true;
   $("#channelDot").className = "channel-dot";
   $("#whatsappDot").className = "channel-dot";
+  $("#translateDot").className = "channel-dot";
   $("#channelStatusText").textContent = "正在检查配置…";
   $("#whatsappStatusText").textContent = "正在检查配置…";
+  $("#translateStatusText").textContent = "正在检查配置…";
   setChannelError("channelError", "");
   setChannelError("whatsappError", "");
+  setChannelError("translateError", "");
   await loadChannelSettings();
 }
 
@@ -1765,12 +1925,105 @@ async function clearWhatsAppCredentials() {
   }
 }
 
+async function saveTranslateKey(event) {
+  event.preventDefault();
+  const apiKey = $("#translateKeyInput").value.trim();
+  if (!apiKey) {
+    setChannelError("translateError", "请输入 Google 翻译 API Key");
+    return;
+  }
+
+  const button = $("#translateSaveBtn");
+  button.disabled = true;
+  button.textContent = "验证中…";
+  setChannelError("translateError", "");
+
+  try {
+    const data = await api("/api/admin/translate", {
+      method: "POST",
+      body: { apiKey }
+    });
+    state.channels.translate = data.translate;
+    state.translate = { ...state.translate, ...data.translate };
+    $("#translateKeyInput").value = "";
+    renderChannelSettings();
+    showToast("Google 翻译已启用", "success");
+  } catch (error) {
+    setChannelError("translateError", error.message);
+  } finally {
+    button.disabled = false;
+    button.textContent = "验证并保存";
+  }
+}
+
+async function clearTranslateKey() {
+  if (!window.confirm("确定清除 Google 翻译 API Key？清除后将停止自动识别和翻译。")) return;
+
+  const button = $("#translateClearBtn");
+  button.disabled = true;
+  setChannelError("translateError", "");
+  try {
+    const data = await api("/api/admin/translate", { method: "DELETE" });
+    state.channels.translate = data.translate;
+    state.translate = { ...state.translate, ...data.translate };
+    renderChannelSettings();
+    if (state.active) renderChatHeader();
+    showToast("Google 翻译 Key 已清除", "success");
+  } catch (error) {
+    setChannelError("translateError", error.message);
+  } finally {
+    button.disabled = false;
+  }
+}
+
 /* ---------- Team ---------- */
 async function openTeamModal() {
   if (state.me.role !== "admin") return;
   $("#teamModal").hidden = false;
   $("#createUserError").hidden = true;
-  await loadTeamUsers();
+  setChannelError("assignmentError", "");
+  await Promise.all([loadTeamUsers(), loadAssignmentSettings()]);
+}
+
+async function loadAssignmentSettings() {
+  try {
+    const data = await api("/api/admin/assignment");
+    renderAssignmentSettings(data.assignment);
+  } catch (error) {
+    setChannelError("assignmentError", error.message);
+  }
+}
+
+function renderAssignmentSettings(settings) {
+  state.assignment = settings || state.assignment;
+  $("#autoAssignEnabled").checked = Boolean(state.assignment.enabled);
+  $("#autoAssignStrategy").value = state.assignment.strategy || "least_active";
+  $("#autoAssignMax").value = Number(state.assignment.maxActive || 0);
+}
+
+async function saveAssignmentSettings(event) {
+  event.preventDefault();
+  const button = $("#autoAssignSaveBtn");
+  button.disabled = true;
+  button.textContent = "保存中…";
+  setChannelError("assignmentError", "");
+  try {
+    const data = await api("/api/admin/assignment", {
+      method: "POST",
+      body: {
+        enabled: $("#autoAssignEnabled").checked,
+        strategy: $("#autoAssignStrategy").value,
+        maxActive: Number($("#autoAssignMax").value) || 0
+      }
+    });
+    renderAssignmentSettings(data.assignment);
+    showToast(data.assignment.enabled ? "自动分配已开启" : "自动分配已关闭", "success");
+  } catch (error) {
+    setChannelError("assignmentError", error.message);
+  } finally {
+    button.disabled = false;
+    button.textContent = "保存自动分配";
+  }
 }
 
 async function loadTeamUsers() {
@@ -2080,6 +2333,8 @@ function bindEvents() {
 
   $("#statsBtn").addEventListener("click", openStatsModal);
   $("#statsClose").addEventListener("click", () => { $("#statsModal").hidden = true; });
+  $("#statsExport").addEventListener("click", exportStatsCsv);
+  $("#viewerExport").addEventListener("click", exportStatsCsv);
   $("#statsModal").addEventListener("click", event => {
     if (event.target === $("#statsModal")) $("#statsModal").hidden = true;
   });
@@ -2094,8 +2349,14 @@ function bindEvents() {
   $("#telegramClearBtn").addEventListener("click", clearTelegramToken);
   $("#whatsappForm").addEventListener("submit", saveWhatsAppCredentials);
   $("#whatsappClearBtn").addEventListener("click", clearWhatsAppCredentials);
+  $("#translateForm").addEventListener("submit", saveTranslateKey);
+  $("#translateClearBtn").addEventListener("click", clearTranslateKey);
+  $("#replyLanguage").addEventListener("change", () => {
+    if (state.active) state.replyLanguages[state.active.id] = $("#replyLanguage").value;
+  });
 
   $("#teamBtn").addEventListener("click", openTeamModal);
+  $("#assignmentForm").addEventListener("submit", saveAssignmentSettings);
   $("#teamClose").addEventListener("click", () => { $("#teamModal").hidden = true; });
   $("#teamModal").addEventListener("click", event => {
     if (event.target === $("#teamModal")) $("#teamModal").hidden = true;

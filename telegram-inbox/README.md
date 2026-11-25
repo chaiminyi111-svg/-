@@ -9,7 +9,8 @@
 - Telegram Bot 长轮询收消息，无需公网 webhook
 - WhatsApp Cloud API webhook 收消息，支持文本回复
 - 统一收件箱：私聊、群聊、未读计数、消息预览、渠道标识
-- 客服分配：管理员可分配给任意客服，普通客服可领取/取消分配
+- Google 翻译：自动识别客户语言，外文消息自动翻译为中文；回复时可选择「跟随客户语言」或指定其他语言
+- 客服分配：管理员可分配给任意客服；支持自动分配（当前接待最少/轮询）和每人接待上限
 - 会话可见范围：管理员可查看全部；普通客服只能查看自己名下和未分配的会话，不能查看其他客服的会话
 - 会话状态：待处理、跟进中、已关闭
 - 文本回复：通过 Telegram Bot API / WhatsApp Cloud API 发送并落库
@@ -17,9 +18,9 @@
 - 快捷回复：团队共享常用话术，一键插入输入框
 - 客户资料：给会话打标签、记录内部备注，支持按标签/备注搜索
 - 入站媒体（Telegram）：图片、文件、语音、音频、视频、贴纸展示与下载代理
-- 统计看板：最近 7/14/30 天会话、消息趋势、客服工作量
+- 统计看板：最近 7/14/30 天会话、消息趋势、客服工作量、平均首响、平均解决时长、SLA 超时，支持导出 CSV
 - 团队管理：管理员创建客服、调整角色、停用/启用、重置密码
-- 渠道设置：管理员可在网页顶栏「渠道」中配置 Telegram 和 WhatsApp 凭据，保存前自动验证，立即生效，无需改 `.env` 或重启
+- 渠道设置：管理员可在网页顶栏「渠道」中配置 Telegram、WhatsApp 和 Google 翻译凭据，保存前自动验证，立即生效，无需改 `.env` 或重启
 - 实时更新：SSE 推送新消息和会话变更，断线自动降级轮询
 - 本地账号体系：scrypt 密码哈希、HttpOnly 会话 Cookie、登录限流
 - 安全基线：CSRF 同源校验、CSP、参数化 SQL、审计日志
@@ -46,11 +47,14 @@ telegram-inbox/
 │   ├── config.js          # 环境变量
 │   ├── db.js              # SQLite 表结构、初始化、审计
 │   ├── realtime.js        # SSE 广播器
-│   ├── store.js           # 会话/消息查询
+│   ├── store.js           # 会话/消息查询、统计
 │   ├── telegram.js        # Telegram Bot 长轮询、收发消息、媒体
 │   ├── whatsapp.js        # WhatsApp Cloud API webhook、文本收发
+│   ├── translate.js       # Google Cloud Translation 识别与翻译
+│   ├── assignment.js      # 新会话自动分配
 │   └── util.js
 ├── scripts/
+│   ├── backup.js          # SQLite 一致性备份
 │   └── check-telegram.js  # 校验真实 Bot Token
 ├── public/                # 中文工作台前端
 ├── test/app.test.js       # 使用 mock Telegram / WhatsApp 的端到端 API 测试
@@ -224,6 +228,16 @@ TRUST_PROXY=true
 | `WHATSAPP_VERIFY_TOKEN` | 空 | Meta Webhook 校验串；也可在「渠道」页面保存 |
 | `WHATSAPP_APP_SECRET` | 空 | Meta 应用密钥，用于 Webhook 验签；也可在「渠道」页面保存 |
 | `WHATSAPP_API_BASE` | `https://graph.facebook.com/v20.0` | Meta Graph API 地址 |
+| `GOOGLE_TRANSLATE_API_KEY` | 空 | Google Cloud Translation API Key；也可在「渠道」页面保存 |
+| `GOOGLE_TRANSLATE_API_BASE` | `https://translation.googleapis.com` | Google 翻译 API 地址 |
+| `TRANSLATE_TARGET` | `zh-CN` | 入站外文消息默认翻译目标语言 |
+| `TRANSLATE_TIMEOUT_MS` | `10000` | 翻译请求超时毫秒数 |
+| `AUTO_ASSIGN` | `false` | 是否自动分配新会话；也可在「团队」页面开启 |
+| `AUTO_ASSIGN_STRATEGY` | `least_active` | `least_active`（当前接待最少）/ `round_robin`（轮询） |
+| `AGENT_MAX_ACTIVE` | `0` | 每位客服同时接待上限，0 表示不限制 |
+| `SLA_FIRST_RESPONSE_MINUTES` | `15` | 首次响应 SLA 分钟数，用于统计超时 |
+| `BACKUP_DIR` | `$DATA_DIR/backups` | 备份目录 |
+| `BACKUP_KEEP_DAYS` | `14` | 备份保留天数 |
 | `SESSION_DAYS` | `7` | 登录会话有效天数 |
 | `TRUST_PROXY` | `true` | 是否信任反向代理的 `X-Forwarded-*` |
 | `COOKIE_SECURE` | `auto` | `auto` / `true` / `false` |
@@ -246,6 +260,14 @@ docker compose start
 ```
 
 或者在运行中做一致性备份：
+
+```bash
+npm run backup
+```
+
+脚本会执行 WAL checkpoint 后复制数据库到 `data/backups/`，并按 `BACKUP_KEEP_DAYS` 清理旧备份。
+
+手动备份示例：
 
 ```bash
 sqlite3 data/inbox.db ".backup 'data/inbox-backup.db'"
@@ -277,11 +299,11 @@ sqlite3 data/inbox.db ".backup 'data/inbox-backup.db'"
 npm test
 ```
 
-测试会启动 mock Telegram API 和 mock WhatsApp API，覆盖登录、收消息、分配权限、客服会话可见范围、SSE 推送过滤、文本回复、出站图片/文件、媒体代理、WhatsApp webhook 验签与回复、管理员渠道凭据保存/清除、快捷回复、客户标签/备注、统计、搜索、CSRF、角色校验和最后管理员保护，不需要真实平台凭据。
+测试会启动 mock Telegram API、mock WhatsApp API 和 mock Google 翻译 API，覆盖登录、收消息、分配权限、客服会话可见范围、SSE 推送过滤、文本回复、出站图片/文件、媒体代理、WhatsApp webhook 验签与回复、管理员渠道凭据保存/清除、Google 翻译识别与出站翻译、自动分配与接待上限、SLA 统计、CSV 导出、快捷回复、客户标签/备注、搜索、CSRF、角色校验和最后管理员保护，不需要真实平台凭据。
 
 ## 后续路线
 
-1. 响应时长、满意度等更细的统计指标
+1. 客户满意度、在线时长、客服排行榜等更细的统计指标
 2. 出站语音、视频、贴纸
 3. 多渠道适配器：Instagram、Line、邮件；WhatsApp 模板消息
 4. PostgreSQL + Redis + 多实例

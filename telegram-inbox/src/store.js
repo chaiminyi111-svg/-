@@ -120,7 +120,12 @@ function getMessageById(db, id) {
   return db.prepare("SELECT * FROM messages WHERE id = ?").get(id);
 }
 
-function getStats(db, days = 7) {
+function roundMinutes(value) {
+  const number = Number(value);
+  return Number.isFinite(number) ? Math.round(number * 10) / 10 : null;
+}
+
+function getStats(db, days = 7, options = {}) {
   const rangeDays = Math.min(Math.max(Number.parseInt(days, 10) || 7, 1), 30);
   const now = new Date();
   const startDate = new Date(Date.UTC(
@@ -196,6 +201,39 @@ function getStats(db, days = 7) {
     ).all(startIso).map(row => [row.sender_id, Number(row.c || 0)])
   );
 
+  const slaTargetMinutes = Math.max(Number(options.slaFirstResponseMinutes) || 15, 1);
+  const responseRows = db.prepare(
+    `SELECT assignee_id,
+            AVG(CASE WHEN first_response_at IS NOT NULL
+                     THEN (julianday(first_response_at) - julianday(created_at)) * 1440 END) AS avg_first,
+            AVG(CASE WHEN resolved_at IS NOT NULL
+                     THEN (julianday(resolved_at) - julianday(created_at)) * 1440 END) AS avg_resolution,
+            SUM(CASE WHEN
+                  (first_response_at IS NOT NULL
+                   AND (julianday(first_response_at) - julianday(created_at)) * 1440 > ?)
+                  OR (first_response_at IS NULL AND status != 'closed'
+                      AND (julianday('now') - julianday(created_at)) * 1440 > ?)
+                THEN 1 ELSE 0 END) AS sla_breaches
+     FROM conversations
+     WHERE assignee_id IS NOT NULL AND created_at >= ?
+     GROUP BY assignee_id`
+  ).all(slaTargetMinutes, slaTargetMinutes, startIso);
+  const responseByAgent = new Map(responseRows.map(row => [row.assignee_id, row]));
+  const responseTotals = db.prepare(
+    `SELECT AVG(CASE WHEN first_response_at IS NOT NULL
+                     THEN (julianday(first_response_at) - julianday(created_at)) * 1440 END) AS avg_first,
+            AVG(CASE WHEN resolved_at IS NOT NULL
+                     THEN (julianday(resolved_at) - julianday(created_at)) * 1440 END) AS avg_resolution,
+            SUM(CASE WHEN
+                  (first_response_at IS NOT NULL
+                   AND (julianday(first_response_at) - julianday(created_at)) * 1440 > ?)
+                  OR (first_response_at IS NULL AND status != 'closed'
+                      AND (julianday('now') - julianday(created_at)) * 1440 > ?)
+                THEN 1 ELSE 0 END) AS sla_breaches
+     FROM conversations
+     WHERE assignee_id IS NOT NULL AND created_at >= ?`
+  ).get(slaTargetMinutes, slaTargetMinutes, startIso);
+
   const agents = db.prepare(
     `SELECT u.id, u.username, u.display_name, u.role,
             COUNT(c.id) AS assigned,
@@ -225,7 +263,10 @@ function getStats(db, days = 7) {
     pending: Number(row.pending || 0),
     closed: Number(row.closed || 0),
     unread: Number(row.unread || 0),
-    outbound: outboundByAgent.get(row.id) || 0
+    outbound: outboundByAgent.get(row.id) || 0,
+    avgFirstResponseMinutes: roundMinutes(responseByAgent.get(row.id)?.avg_first),
+    avgResolutionMinutes: roundMinutes(responseByAgent.get(row.id)?.avg_resolution),
+    slaBreaches: Number(responseByAgent.get(row.id)?.sla_breaches || 0)
   }));
 
   return {
@@ -244,7 +285,11 @@ function getStats(db, days = 7) {
       messagesOut: Number(messageTotals.outbound || 0),
       newConversations,
       newAssigned,
-      activeAgents: agents.length
+      activeAgents: agents.length,
+      avgFirstResponseMinutes: roundMinutes(responseTotals?.avg_first),
+      avgResolutionMinutes: roundMinutes(responseTotals?.avg_resolution),
+      slaBreaches: Number(responseTotals?.sla_breaches || 0),
+      slaTargetMinutes
     },
     daily,
     agents

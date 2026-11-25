@@ -11,6 +11,9 @@ const { openDatabase, bootstrapAdmin } = require("../src/db");
 const { createBroadcaster } = require("../src/realtime");
 const { createTelegramService } = require("../src/telegram");
 const { createWhatsAppService } = require("../src/whatsapp");
+const { createTranslateService } = require("../src/translate");
+const { autoAssignConversation, saveSettings } = require("../src/assignment");
+const { getStats } = require("../src/store");
 const { createApp } = require("../src/app");
 const { createLogger } = require("../src/util");
 
@@ -118,6 +121,53 @@ function startMockTelegram() {
         base: `http://127.0.0.1:${server.address().port}`,
         sent,
         mediaSent
+      });
+    });
+  });
+}
+
+function startMockTranslate() {
+  const calls = [];
+  const server = http.createServer(async (req, res) => {
+    let body = "";
+    for await (const chunk of req) body += chunk;
+    const url = new URL(req.url, "http://127.0.0.1");
+    const payload = body ? JSON.parse(body) : {};
+    calls.push({ path: url.pathname, payload });
+
+    if (url.pathname.endsWith("/language/translate/v2/detect")) {
+      const text = String(payload.q || "");
+      const language = /[\u4e00-\u9fff]/.test(text) ? "zh-CN"
+        : text.toLowerCase().includes("bonjour") ? "fr" : "en";
+      res.setHeader("content-type", "application/json");
+      res.end(JSON.stringify({ data: { detections: [[{ language, confidence: 0.99 }]] } }));
+      return;
+    }
+
+    if (url.pathname.endsWith("/language/translate/v2")) {
+      const text = String(payload.q || "");
+      const target = String(payload.target || "en");
+      let translatedText = text;
+      if (target === "zh-CN") translatedText = "你好";
+      else if (target === "en") translatedText = "Hello";
+      else if (target === "ja") translatedText = "こんにちは";
+      res.setHeader("content-type", "application/json");
+      res.end(JSON.stringify({
+        data: { translations: [{ translatedText, detectedSourceLanguage: /[\u4e00-\u9fff]/.test(text) ? "zh-CN" : "en" }] }
+      }));
+      return;
+    }
+
+    res.statusCode = 404;
+    res.end("{}");
+  });
+
+  return new Promise(resolve => {
+    server.listen(0, "127.0.0.1", () => {
+      resolve({
+        server,
+        base: `http://127.0.0.1:${server.address().port}`,
+        calls
       });
     });
   });
@@ -684,12 +734,27 @@ test("Telegram support inbox end-to-end API", async t => {
     assert.equal(agent.assigned, 1);
     assert.equal(agent.outbound, 1);
     assert.equal(result.data.stats.agents.some(item => item.username === "viewer"), false);
+
+    const csv = await fetch(base + "/api/stats/export.csv?days=7", {
+      headers: { cookie: adminCookie }
+    });
+    assert.equal(csv.status, 200);
+    assert.match(csv.headers.get("content-type") || "", /text\/csv/);
+    const csvText = await csv.text();
+    assert.match(csvText, /客服/);
+    assert.match(csvText, /平均首响/);
   });
 
   await t.test("viewer role can only read statistics", async () => {
     const stats = await apiRequest(base, "/api/stats?days=7", { cookie: viewerCookie });
     assert.equal(stats.response.status, 200);
     assert.equal(stats.data.stats.totals.conversations, 1);
+
+    const viewerCsv = await fetch(base + "/api/stats/export.csv?days=7", {
+      headers: { cookie: viewerCookie }
+    });
+    assert.equal(viewerCsv.status, 200);
+    assert.match(await viewerCsv.text(), /客服/);
 
     for (const path of [
       "/api/conversations?scope=all&status=all",
@@ -1233,4 +1298,186 @@ test("WhatsApp Cloud API adapter", async t => {
     assert.equal(restored.data.whatsapp.configured, true);
     assert.equal(whatsapp.configured, true);
   });
+});
+
+
+test("Google translation detects language and translates replies", async t => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "translate-inbox-test-"));
+  const telegramMock = await startMockTelegram();
+  const translateMock = await startMockTranslate();
+  const config = {
+    root: path.resolve(__dirname, ".."),
+    dataDir: tempDir,
+    dbPath: path.join(tempDir, "test.db"),
+    port: 0,
+    host: "127.0.0.1",
+    nodeEnv: "test",
+    adminUsername: "admin",
+    adminPassword: "translate-admin-pass",
+    adminDisplayName: "管理员",
+    telegramToken: "TEST",
+    telegramApiBase: telegramMock.base,
+    telegramPollTimeout: 5,
+    telegramDeleteWebhook: false,
+    sessionDays: 7,
+    trustProxy: false,
+    cookieSecure: false,
+    publicOrigin: "",
+    maxMessageLength: 4096,
+    logLevel: "error",
+    googleTranslateApiKey: "",
+    googleTranslateApiBase: translateMock.base,
+    translateTarget: "zh-CN"
+  };
+
+  const logger = createLogger("error");
+  const db = openDatabase(config.dbPath);
+  bootstrapAdmin(db, config);
+  const broadcaster = createBroadcaster(logger);
+  const translate = createTranslateService({ db, config, logger });
+  const telegram = createTelegramService({ db, config, logger, broadcaster, translate });
+  const app = createApp({ db, config, telegram, broadcaster, logger, translate });
+  const server = await new Promise(resolve => {
+    const instance = app.listen(0, "127.0.0.1", () => resolve(instance));
+  });
+  const base = `http://127.0.0.1:${server.address().port}`;
+
+  t.after(async () => {
+    await new Promise(resolve => server.close(resolve));
+    await telegram.stop();
+    broadcaster.close();
+    db.close();
+    await new Promise(resolve => telegramMock.server.close(resolve));
+    await new Promise(resolve => translateMock.server.close(resolve));
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  const adminCookie = await login(base, "admin", "translate-admin-pass");
+  const before = await apiRequest(base, "/api/admin/translate", { cookie: adminCookie });
+  assert.equal(before.response.status, 200);
+  assert.equal(before.data.translate.configured, false);
+
+  const saved = await apiRequest(base, "/api/admin/translate", {
+    method: "POST",
+    cookie: adminCookie,
+    body: { apiKey: "TEST_TRANSLATE_KEY" }
+  });
+  assert.equal(saved.response.status, 200, JSON.stringify(saved.data));
+  assert.equal(saved.data.translate.configured, true);
+  assert.equal(saved.data.translate.source, "database");
+  assert.equal(JSON.stringify(saved.data).includes("TEST_TRANSLATE_KEY"), false);
+
+  const now = Math.floor(Date.now() / 1000);
+  await telegram.ingestUpdate({
+    message: {
+      message_id: 501,
+      date: now,
+      chat: { id: 99001, type: "private", username: "alice" },
+      from: { id: 99001, first_name: "Alice", username: "alice" },
+      text: "Hello, how can I help?"
+    }
+  });
+
+  const list = await apiRequest(base, "/api/conversations?scope=all&status=all", { cookie: adminCookie });
+  const conversation = list.data.items.find(item => item.chatId === "99001");
+  assert.ok(conversation);
+  assert.equal(conversation.detectedLanguage, "en");
+
+  const messages = await apiRequest(base, `/api/conversations/${conversation.id}/messages`, { cookie: adminCookie });
+  assert.equal(messages.data.messages.length, 1);
+  assert.equal(messages.data.messages[0].language, "en");
+  assert.equal(messages.data.messages[0].translatedBody, "你好");
+  assert.equal(messages.data.messages[0].translationLanguage, "zh-CN");
+
+  const reply = await apiRequest(base, `/api/conversations/${conversation.id}/messages`, {
+    method: "POST",
+    cookie: adminCookie,
+    body: { text: "你好，请问需要什么帮助？", targetLanguage: "en" }
+  });
+  assert.equal(reply.response.status, 201, JSON.stringify(reply.data));
+  assert.equal(telegramMock.sent.at(-1).text, "Hello");
+  assert.equal(reply.data.message.body, "Hello");
+  assert.equal(reply.data.message.language, "en");
+  assert.equal(reply.data.message.meta.translated, true);
+  assert.equal(reply.data.message.meta.originalText, "你好，请问需要什么帮助？");
+
+  const follow = await apiRequest(base, `/api/conversations/${conversation.id}/messages`, {
+    method: "POST",
+    cookie: adminCookie,
+    body: { text: "你好", targetLanguage: "auto" }
+  });
+  assert.equal(follow.response.status, 201, JSON.stringify(follow.data));
+  assert.equal(telegramMock.sent.at(-1).text, "Hello");
+
+  const cleared = await apiRequest(base, "/api/admin/translate", {
+    method: "DELETE",
+    cookie: adminCookie
+  });
+  assert.equal(cleared.response.status, 200);
+  assert.equal(cleared.data.translate.configured, false);
+  assert.equal(translate.configured(), false);
+});
+
+
+test("auto assignment respects capacity and stats track SLA", async t => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "assign-test-"));
+  const config = {
+    root: path.resolve(__dirname, ".."),
+    dataDir: tempDir,
+    dbPath: path.join(tempDir, "test.db"),
+    adminUsername: "admin",
+    adminPassword: "admin-pass-123",
+    adminDisplayName: "管理员",
+    autoAssign: false,
+    autoAssignStrategy: "least_active",
+    agentMaxActive: 0,
+    slaFirstResponseMinutes: 15
+  };
+  const db = openDatabase(config.dbPath);
+  bootstrapAdmin(db, config);
+  t.after(() => {
+    db.close();
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  const now = new Date().toISOString();
+  const insertUser = db.prepare(
+    "INSERT INTO users (username, display_name, password_hash, role, active, created_at, updated_at) VALUES (?, ?, 'x', 'agent', 1, ?, ?)"
+  );
+  const a1 = Number(insertUser.run("a1", "客服一", now, now).lastInsertRowid);
+  const a2 = Number(insertUser.run("a2", "客服二", now, now).lastInsertRowid);
+  const insertConversation = db.prepare(
+    "INSERT INTO conversations (telegram_chat_id, title, created_at, updated_at, last_message_at) VALUES (?, ?, ?, ?, ?)"
+  );
+  const c1 = Number(insertConversation.run("c1", "C1", now, now, now).lastInsertRowid);
+  const c2 = Number(insertConversation.run("c2", "C2", new Date(Date.now() - 60 * 60000).toISOString(), now, now).lastInsertRowid);
+  const c3 = Number(insertConversation.run("c3", "C3", now, now, now).lastInsertRowid);
+  const c4 = Number(insertConversation.run("c4", "C4", now, now, now).lastInsertRowid);
+
+  saveSettings(db, { enabled: true, strategy: "round_robin", maxActive: 0 });
+  assert.equal(autoAssignConversation(db, c1, config).id, a1);
+  assert.equal(autoAssignConversation(db, c2, config).id, a2);
+  assert.equal(autoAssignConversation(db, c3, config).id, a1);
+  assert.equal(autoAssignConversation(db, c4, config).id, a2);
+
+  saveSettings(db, { enabled: true, strategy: "round_robin", maxActive: 1 });
+  const c5 = Number(insertConversation.run("c5", "C5", now, now, now).lastInsertRowid);
+  assert.equal(autoAssignConversation(db, c5, config), null);
+  assert.equal(db.prepare("SELECT assignee_id FROM conversations WHERE id = ?").get(c5).assignee_id, null);
+
+  db.prepare("UPDATE conversations SET first_response_at = ?, resolved_at = ? WHERE id = ?").run(
+    new Date(Date.now() + 2 * 60000).toISOString(),
+    new Date(Date.now() + 10 * 60000).toISOString(),
+    c1
+  );
+
+  const stats = getStats(db, 7, { slaFirstResponseMinutes: 15 });
+  const agent1 = stats.agents.find(item => item.username === "a1");
+  const agent2 = stats.agents.find(item => item.username === "a2");
+  assert.equal(agent1.avgFirstResponseMinutes, 2);
+  assert.equal(agent1.avgResolutionMinutes, 10);
+  assert.equal(agent2.slaBreaches, 1);
+  assert.equal(stats.totals.avgFirstResponseMinutes, 2);
+  assert.equal(stats.totals.avgResolutionMinutes, 10);
+  assert.equal(stats.totals.slaBreaches, 1);
 });

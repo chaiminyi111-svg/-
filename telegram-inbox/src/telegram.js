@@ -1,6 +1,7 @@
 const path = require("node:path");
 const { getSetting, setSetting, withTransaction } = require("./db");
 const { getConversationById } = require("./store");
+const { autoAssignConversation } = require("./assignment");
 const {
   displayNameFromTelegram,
   messagePreview,
@@ -304,7 +305,7 @@ function extractContent(message) {
   return { type: "unknown", body: "[暂不支持的消息类型]", meta: {} };
 }
 
-function createTelegramService({ db, config, logger, broadcaster }) {
+function createTelegramService({ db, config, logger, broadcaster, translate }) {
   const storedToken = getSetting(db, "telegram_bot_token", null);
   const initialToken = storedToken !== null ? storedToken : config.telegramToken;
   const client = new TelegramClient({
@@ -339,6 +340,14 @@ function createTelegramService({ db, config, logger, broadcaster }) {
     const chatId = String(message.chat.id);
     const from = message.from || message.chat;
     const content = extractContent(message);
+    let translation = null;
+    if (translate?.configured?.() && (content.type === "text" || content.meta?.caption)) {
+      try {
+        translation = await translate.translateInbound(content.body);
+      } catch (error) {
+        logger?.warn("入站消息翻译失败", error.message);
+      }
+    }
     const title = chatTitle(message.chat, from);
     const username = message.chat.username ||
       (message.chat.type === "private" ? from.username : null) ||
@@ -375,6 +384,7 @@ function createTelegramService({ db, config, logger, broadcaster }) {
         conversation = db.prepare(
           "SELECT * FROM conversations WHERE telegram_chat_id = ?"
         ).get(chatId);
+        autoAssignConversation(db, conversation.id, config);
         created = true;
       } else {
         db.prepare(
@@ -387,8 +397,8 @@ function createTelegramService({ db, config, logger, broadcaster }) {
       const insert = db.prepare(
         `INSERT OR IGNORE INTO messages
            (conversation_id, telegram_message_id, direction, sender_id, sender_name,
-            body, message_type, meta_json, created_at)
-         VALUES (?, ?, 'in', NULL, ?, ?, ?, ?, ?)`
+            body, message_type, meta_json, language, translated_body, translation_language, created_at)
+         VALUES (?, ?, 'in', NULL, ?, ?, ?, ?, ?, ?, ?, ?)`
       ).run(
         conversation.id,
         String(message.message_id),
@@ -396,6 +406,9 @@ function createTelegramService({ db, config, logger, broadcaster }) {
         content.body,
         content.type,
         JSON.stringify(content.meta),
+        translation?.language || null,
+        translation?.translatedBody || null,
+        translation?.translationLanguage || null,
         createdAt
       );
 
@@ -403,12 +416,16 @@ function createTelegramService({ db, config, logger, broadcaster }) {
       if (!changed && isEdited) {
         const updateResult = db.prepare(
           `UPDATE messages
-           SET body = ?, message_type = ?, meta_json = ?
+           SET body = ?, message_type = ?, meta_json = ?,
+               language = ?, translated_body = ?, translation_language = ?
            WHERE conversation_id = ? AND telegram_message_id = ? AND direction = 'in'`
         ).run(
           content.body,
           content.type,
           JSON.stringify(content.meta),
+          translation?.language || null,
+          translation?.translatedBody || null,
+          translation?.translationLanguage || null,
           conversation.id,
           String(message.message_id)
         );
@@ -416,6 +433,11 @@ function createTelegramService({ db, config, logger, broadcaster }) {
       }
 
       if (changed) {
+        if (translation?.language) {
+          db.prepare(
+            "UPDATE conversations SET detected_language = ? WHERE id = ?"
+          ).run(translation.language, conversation.id);
+        }
         if (isEdited) {
           db.prepare(
             `UPDATE conversations
@@ -463,12 +485,16 @@ function createTelegramService({ db, config, logger, broadcaster }) {
     return { ...result, conversation: payload.conversation, message: payload.message };
   }
 
-  async function sendReply(conversation, text, user) {
+  async function sendReply(conversation, text, user, options = {}) {
     if (!client.configured) {
       throw new TelegramError("未配置 TELEGRAM_BOT_TOKEN，暂时无法发送消息", "NOT_CONFIGURED");
     }
 
-    const sent = await client.sendMessage(conversation.telegram_chat_id, text);
+    const prepared = translate?.prepareOutbound
+      ? await translate.prepareOutbound(text, options.targetLanguage, conversation)
+      : { text, language: null, meta: {} };
+    const outboundText = prepared.text;
+    const sent = await client.sendMessage(conversation.telegram_chat_id, outboundText);
     const createdAt = new Date(
       Number(sent.date || Math.floor(Date.now() / 1000)) * 1000
     ).toISOString();
@@ -478,15 +504,16 @@ function createTelegramService({ db, config, logger, broadcaster }) {
       const insert = db.prepare(
         `INSERT INTO messages
            (conversation_id, telegram_message_id, direction, sender_id, sender_name,
-            body, message_type, meta_json, created_at)
-         VALUES (?, ?, 'out', ?, ?, ?, 'text', ?, ?)`
+            body, message_type, meta_json, language, created_at)
+         VALUES (?, ?, 'out', ?, ?, ?, 'text', ?, ?, ?)`
       ).run(
         conversation.id,
         String(sent.message_id),
         user.id,
         user.displayName,
-        text,
-        JSON.stringify({ via: "bot" }),
+        outboundText,
+        JSON.stringify({ via: "bot", ...prepared.meta }),
+        prepared.language || null,
         createdAt
       );
 
@@ -495,9 +522,10 @@ function createTelegramService({ db, config, logger, broadcaster }) {
          SET last_message_at = ?,
              last_message_preview = ?,
              last_message_direction = 'out',
+             first_response_at = COALESCE(first_response_at, ?),
              updated_at = ?
          WHERE id = ?`
-      ).run(createdAt, messagePreview(text), now, conversation.id);
+      ).run(createdAt, messagePreview(outboundText), now, now, conversation.id);
 
       return Number(insert.lastInsertRowid);
     });
@@ -562,9 +590,10 @@ function createTelegramService({ db, config, logger, broadcaster }) {
          SET last_message_at = ?,
              last_message_preview = ?,
              last_message_direction = 'out',
+             first_response_at = COALESCE(first_response_at, ?),
              updated_at = ?
          WHERE id = ?`
-      ).run(createdAt, messagePreview(body), now, conversation.id);
+      ).run(createdAt, messagePreview(body), now, now, conversation.id);
 
       return Number(insert.lastInsertRowid);
     });

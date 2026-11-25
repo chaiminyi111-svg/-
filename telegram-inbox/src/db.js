@@ -35,6 +35,9 @@ CREATE TABLE IF NOT EXISTS conversations (
   status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'pending', 'closed')),
   assignee_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
   assigned_at TEXT,
+  detected_language TEXT,
+  first_response_at TEXT,
+  resolved_at TEXT,
   last_message_at TEXT,
   last_message_preview TEXT,
   last_message_direction TEXT,
@@ -68,6 +71,9 @@ CREATE TABLE IF NOT EXISTS messages (
   body TEXT NOT NULL,
   message_type TEXT NOT NULL DEFAULT 'text',
   meta_json TEXT,
+  language TEXT,
+  translated_body TEXT,
+  translation_language TEXT,
   created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_messages_conversation ON messages(conversation_id, created_at);
@@ -111,6 +117,12 @@ function openDatabase(dbPath) {
   ensureColumn(db, "conversations", "notes", "TEXT NOT NULL DEFAULT ''");
   ensureColumn(db, "conversations", "tags_json", "TEXT NOT NULL DEFAULT '[]'");
   ensureColumn(db, "conversations", "assigned_at", "TEXT");
+  ensureColumn(db, "conversations", "detected_language", "TEXT");
+  ensureColumn(db, "conversations", "first_response_at", "TEXT");
+  ensureColumn(db, "conversations", "resolved_at", "TEXT");
+  ensureColumn(db, "messages", "language", "TEXT");
+  ensureColumn(db, "messages", "translated_body", "TEXT");
+  ensureColumn(db, "messages", "translation_language", "TEXT");
   db.exec(`
     UPDATE conversations
     SET assigned_at = COALESCE(last_message_at, created_at, updated_at)

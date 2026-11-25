@@ -4,6 +4,7 @@ const { openDatabase, bootstrapAdmin } = require("./src/db");
 const { createBroadcaster } = require("./src/realtime");
 const { createTelegramService } = require("./src/telegram");
 const { createWhatsAppService } = require("./src/whatsapp");
+const { createTranslateService } = require("./src/translate");
 const { createApp } = require("./src/app");
 
 const logger = createLogger(config.logLevel);
@@ -23,15 +24,17 @@ async function main() {
   }
 
   const broadcaster = createBroadcaster(logger);
-  const telegram = createTelegramService({ db, config, logger, broadcaster });
-  const whatsapp = createWhatsAppService({ db, config, logger, broadcaster });
-  const app = createApp({ db, config, telegram, whatsapp, broadcaster, logger });
+  const translate = createTranslateService({ db, config, logger });
+  const telegram = createTelegramService({ db, config, logger, broadcaster, translate });
+  const whatsapp = createWhatsAppService({ db, config, logger, broadcaster, translate });
+  const app = createApp({ db, config, telegram, whatsapp, broadcaster, logger, translate });
 
   const server = app.listen(config.port, config.host, () => {
     logger.info(`Telegram 客服收件箱已启动：http://${config.host}:${config.port}`);
     logger.info(`数据库：${config.dbPath}`);
     logger.info(`Telegram Bot：${telegram.configured ? "已配置" : "未配置（只能查看已有数据）"}`);
     logger.info(`WhatsApp Cloud API：${whatsapp.configured ? "已配置" : "未配置"}`);
+    logger.info(`Google 翻译：${translate.configured() ? "已配置" : "未配置"}`);
   });
 
   server.on("error", error => {

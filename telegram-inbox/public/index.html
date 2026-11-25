@@ -123,6 +123,7 @@
               <div class="chat-title-block">
                 <h2 id="chatTitle">会话</h2>
                 <p id="chatSubtitle"></p>
+                <span id="chatLanguage" class="chat-language" hidden></span>
               </div>
             </div>
             <div class="chat-actions">
@@ -184,11 +185,16 @@
           <form id="composer" class="composer">
             <textarea id="messageInput" rows="1" maxlength="4096" placeholder="输入回复，Enter 发送，Shift + Enter 换行" autocomplete="off"></textarea>
             <div class="composer-actions">
+              <label id="replyLanguageWrap" class="reply-language" hidden>
+                <span>回复语言</span>
+                <select id="replyLanguage" aria-label="回复语言"></select>
+              </label>
               <button id="attachBtn" class="ghost" type="button">附件</button>
               <button id="cannedBtn" class="ghost" type="button">快捷回复</button>
               <span id="charCount">0 / 4096</span>
               <button id="sendBtn" class="primary" type="submit">发送</button>
             </div>
+            <div id="translateHint" class="composer-hint" hidden>Google 翻译未配置，管理员可在「渠道」中启用后自动识别语言并翻译。</div>
             <input id="fileInput" type="file" accept="image/*,.pdf,.doc,.docx,.xls,.xlsx,.txt,.csv,.zip" hidden>
           </form>
           <div id="composerHint" class="composer-hint">Enter 发送 · Shift + Enter 换行</div>
@@ -221,6 +227,7 @@
           <p id="viewerSubtitle">只读统计账号 · 不显示客户会话内容。</p>
         </div>
         <label class="viewer-range">
+          <button id="viewerExport" class="ghost export-btn" type="button">导出 CSV</button>
           统计范围
           <select id="viewerRange" aria-label="统计范围">
             <option value="1">今日</option>
@@ -251,6 +258,9 @@
                 <th>已关闭</th>
                 <th>未读</th>
                 <th>发出消息</th>
+                <th>平均首响</th>
+                <th>平均解决</th>
+                <th>SLA 超时</th>
               </tr>
             </thead>
             <tbody id="viewerAgentRows"></tbody>
@@ -306,6 +316,30 @@
           <div id="createUserError" class="form-error" hidden></div>
         </form>
       </div>
+
+      <div class="team-auto">
+        <div class="section-label">自动分配</div>
+        <form id="assignmentForm" class="assignment-form">
+          <label class="checkline">
+            <input id="autoAssignEnabled" type="checkbox">
+            新会话自动分配给客服
+          </label>
+          <label>
+            分配策略
+            <select id="autoAssignStrategy">
+              <option value="least_active">当前接待最少</option>
+              <option value="round_robin">轮询</option>
+            </select>
+          </label>
+          <label>
+            每人接待上限
+            <input id="autoAssignMax" type="number" min="0" max="999" step="1" value="0">
+          </label>
+          <button class="primary" type="submit" id="autoAssignSaveBtn">保存自动分配</button>
+          <div id="assignmentError" class="form-error" hidden></div>
+        </form>
+        <p class="channel-note">上限填 0 表示不限制。自动分配只会选择已启用、角色为客服的成员，已关闭会话不占用名额。</p>
+      </div>
     </div>
   </div>
 
@@ -317,6 +351,7 @@
           <p>会话、消息和客服工作量概览。</p>
         </div>
         <div class="stats-head-actions">
+          <button id="statsExport" class="ghost export-btn" type="button">导出 CSV</button>
           <select id="statsRange" aria-label="统计范围">
             <option value="1">今日</option>
             <option value="7">最近 7 天</option>
@@ -355,6 +390,9 @@
                 <th>已关闭</th>
                 <th>未读</th>
                 <th>发出消息</th>
+                <th>平均首响</th>
+                <th>平均解决</th>
+                <th>SLA 超时</th>
               </tr>
             </thead>
             <tbody id="statsAgentRows"></tbody>
@@ -510,6 +548,41 @@
         <strong>Webhook 地址</strong>
         <p><code id="whatsappWebhookUrl">/webhook/whatsapp</code></p>
         <p>在 Meta 后台把回调地址填成上面的完整 HTTPS 地址，并填写相同的 Verify Token。App Secret 用于校验消息签名。</p>
+      </div>
+
+      <div class="channel-divider"></div>
+
+      <div class="channel-status" id="translateStatus">
+        <span class="channel-dot" id="translateDot" aria-hidden="true"></span>
+        <div>
+          <strong>Google 翻译</strong>
+          <span id="translateStatusText">正在检查配置…</span>
+        </div>
+      </div>
+
+      <form id="translateForm" class="channel-form">
+        <label>
+          Google Cloud Translation API Key
+          <input
+            id="translateKeyInput"
+            type="password"
+            autocomplete="off"
+            spellcheck="false"
+            placeholder="AIza...（需要启用 Cloud Translation API）"
+            maxlength="200"
+          >
+        </label>
+        <p class="channel-note">保存前会调用 Google 翻译接口验证 Key。Key 只保存在服务器数据库，不会回显到页面。启用后会自动识别客户语言，并把外文消息翻译为中文显示。</p>
+        <div class="channel-actions">
+          <button class="primary" type="submit" id="translateSaveBtn">验证并保存</button>
+          <button class="ghost" type="button" id="translateClearBtn" hidden>清除 Key</button>
+        </div>
+        <div id="translateError" class="form-error" hidden></div>
+      </form>
+
+      <div class="channel-help">
+        <strong>怎么获取 Key？</strong>
+        <p>在 Google Cloud Console 启用 Cloud Translation API，创建 API Key 后填入这里。Key 仅用于服务端调用，不会发送到浏览器。</p>
       </div>
     </div>
   </div>

@@ -27,6 +27,7 @@ const {
   getStats
 } = require("./store");
 const { nowIso, toPublicUser, toConversationSummary, toCannedReply } = require("./util");
+const { readSettings, saveSettings } = require("./assignment");
 
 const VERSION = "0.1.0";
 
@@ -39,7 +40,7 @@ function parseId(value) {
   return Number.isFinite(id) && id > 0 ? id : null;
 }
 
-function createApp({ db, config, telegram, whatsapp, broadcaster, logger }) {
+function createApp({ db, config, telegram, whatsapp, broadcaster, logger, translate }) {
   const app = express();
   app.disable("x-powered-by");
   app.set("trust proxy", config.trustProxy ? 1 : false);
@@ -106,7 +107,8 @@ function createApp({ db, config, telegram, whatsapp, broadcaster, logger }) {
     "/api/auth/me",
     "/api/auth/logout",
     "/api/auth/password",
-    "/api/stats"
+    "/api/stats",
+    "/api/stats/export.csv"
   ]);
   app.use((req, res, next) => {
     if (req.user?.role !== "viewer") return next();
@@ -140,6 +142,7 @@ function createApp({ db, config, telegram, whatsapp, broadcaster, logger }) {
       version: VERSION,
       telegramConfigured: Boolean(telegram?.configured),
       whatsappConfigured: Boolean(whatsapp?.configured),
+      translationConfigured: Boolean(translate?.configured?.()),
       now: nowIso()
     });
   });
@@ -160,7 +163,7 @@ function createApp({ db, config, telegram, whatsapp, broadcaster, logger }) {
     if (!whatsapp.verifySignature(req.rawBody, req.get("x-hub-signature-256"))) {
       return jsonError(res, 403, "Webhook 签名校验失败");
     }
-    const count = whatsapp.ingestWebhook(req.body);
+    const count = await whatsapp.ingestWebhook(req.body);
     logger?.debug(`收到 WhatsApp webhook，处理 ${count} 条消息`);
     res.json({ received: true });
   }));
@@ -195,6 +198,16 @@ function createApp({ db, config, telegram, whatsapp, broadcaster, logger }) {
 
   app.get("/api/auth/me", requireAuth, (req, res) => {
     res.json({ user: req.user });
+  });
+
+  app.get("/api/translate/config", requireAuth, (req, res) => {
+    res.json({ translate: translate?.status?.() || {
+      configured: false,
+      source: "none",
+      provider: "google",
+      defaultTarget: "zh-CN",
+      languages: []
+    } });
   });
 
   app.post("/api/auth/password", requireAuth, (req, res) => {
@@ -324,6 +337,46 @@ function createApp({ db, config, telegram, whatsapp, broadcaster, logger }) {
     destroyUserSessions(db, id, target.id === req.user.id ? req.session?.tokenHash || null : null);
     audit(db, req.user.id, "user.password_reset", "user", id);
     res.json({ ok: true });
+  });
+
+  app.get("/api/admin/assignment", requireAdmin, (req, res) => {
+    res.json({ assignment: readSettings(db, config) });
+  });
+
+  app.post("/api/admin/assignment", requireAdmin, (req, res) => {
+    const body = req.body || {};
+    const settings = saveSettings(db, {
+      enabled: Boolean(body.enabled),
+      strategy: String(body.strategy || "least_active"),
+      maxActive: Number(body.maxActive) || 0
+    });
+    audit(db, req.user.id, "assignment.settings_updated", "settings", "assignment", JSON.stringify(settings));
+    res.json({ assignment: settings });
+  });
+
+  app.get("/api/admin/translate", requireAdmin, (req, res) => {
+    res.json({ translate: translate?.status?.() || { configured: false, source: "none", provider: "google", languages: [] } });
+  });
+
+  app.post("/api/admin/translate", requireAdmin, asyncRoute(async (req, res) => {
+    const apiKey = String(req.body?.apiKey || "").trim();
+    if (!apiKey) return jsonError(res, 400, "请输入 Google 翻译 API Key");
+    if (!translate?.verifyKey) return jsonError(res, 503, "翻译服务不可用");
+    try {
+      await translate.verifyKey(apiKey);
+    } catch (error) {
+      const status = error.code === "TRANSLATION_NETWORK" ? 502 : 400;
+      return jsonError(res, status, error.message || "Google 翻译 API Key 验证失败");
+    }
+    translate.saveApiKey(apiKey);
+    audit(db, req.user.id, "translate.credentials_updated", "channel", "google_translate");
+    res.json({ translate: translate.status() });
+  }));
+
+  app.delete("/api/admin/translate", requireAdmin, (req, res) => {
+    translate?.clearApiKey?.();
+    audit(db, req.user.id, "translate.credentials_cleared", "channel", "google_translate");
+    res.json({ translate: translate?.status?.() || { configured: false, source: "none", provider: "google", languages: [] } });
   });
 
   app.get("/api/admin/telegram", requireAdmin, asyncRoute(async (req, res) => {
@@ -525,6 +578,7 @@ function createApp({ db, config, telegram, whatsapp, broadcaster, logger }) {
       return jsonError(res, 400, `消息不能超过 ${config.maxMessageLength} 个字符`);
     }
     const channel = conversation.channel || "telegram";
+    const targetLanguage = String(req.body?.targetLanguage || "auto").slice(0, 20);
     const service = channel === "whatsapp" ? whatsapp : telegram;
     if (!service?.configured) {
       return jsonError(res, 503, channel === "whatsapp"
@@ -533,15 +587,20 @@ function createApp({ db, config, telegram, whatsapp, broadcaster, logger }) {
     }
 
     try {
-      const result = await service.sendReply(conversation, text, req.user);
+      const result = await service.sendReply(conversation, text, req.user, { targetLanguage });
       audit(db, req.user.id, "message.sent", "conversation", id, JSON.stringify({
         channel,
-        length: text.length
+        length: text.length,
+        targetLanguage
       }));
       res.status(201).json(result);
     } catch (error) {
       logger?.warn(`发送 ${channel} 消息失败`, error.message);
-      const status = error.code === "NOT_CONFIGURED" ? 503 : 502;
+      const status = error.code === "NOT_CONFIGURED" ? 503
+        : error.code === "TRANSLATION_NOT_CONFIGURED" ? 400
+          : error.code === "INVALID_LANGUAGE" ? 400
+            : error.code === "INVALID_INPUT" ? 400
+              : 502;
       return jsonError(res, status, error.message || "发送消息失败");
     }
   }));
@@ -653,6 +712,12 @@ function createApp({ db, config, telegram, whatsapp, broadcaster, logger }) {
       }
       sets.push("status = ?");
       params.push(nextStatus);
+      if (nextStatus === "closed") {
+        sets.push("resolved_at = COALESCE(resolved_at, ?)");
+        params.push(nowIso());
+      } else {
+        sets.push("resolved_at = NULL");
+      }
     }
 
     if (hasNotes) {
@@ -700,7 +765,38 @@ function createApp({ db, config, telegram, whatsapp, broadcaster, logger }) {
   });
 
   app.get("/api/stats", requireAuth, (req, res) => {
-    res.json({ stats: getStats(db, req.query.days) });
+    res.json({ stats: getStats(db, req.query.days, { slaFirstResponseMinutes: config.slaFirstResponseMinutes }) });
+  });
+
+  app.get("/api/stats/export.csv", requireAuth, (req, res) => {
+    const stats = getStats(db, req.query.days, { slaFirstResponseMinutes: config.slaFirstResponseMinutes });
+    const quote = value => `"${String(value ?? "").replace(/"/g, '""')}"`;
+    const lines = [[
+      "客服", "用户名", "角色", "进人", "新分配", "当前接待", "待处理",
+      "跟进中", "已关闭", "未读", "发出消息", "平均首响(分钟)", "平均解决(分钟)", "SLA超时"
+    ]];
+    for (const agent of stats.agents) {
+      lines.push([
+        agent.displayName,
+        agent.username,
+        agent.role === "admin" ? "管理员" : "客服",
+        agent.newConversations,
+        agent.newAssigned,
+        agent.assigned,
+        agent.open,
+        agent.pending,
+        agent.closed,
+        agent.unread,
+        agent.outbound,
+        agent.avgFirstResponseMinutes ?? "",
+        agent.avgResolutionMinutes ?? "",
+        agent.slaBreaches
+      ]);
+    }
+    const csv = "\uFEFF" + lines.map(row => row.map(quote).join(",")).join("\r\n");
+    res.setHeader("content-type", "text/csv; charset=utf-8");
+    res.setHeader("content-disposition", `attachment; filename="support-stats-${stats.rangeDays}d.csv"`);
+    res.send(csv);
   });
 
   app.get("/api/canned-replies", requireAuth, (req, res) => {

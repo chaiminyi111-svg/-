@@ -117,6 +117,9 @@ function toPublicMessage(row) {
     body: row.body,
     type: row.message_type,
     meta: safeJsonParse(row.meta_json, {}),
+    language: row.language || null,
+    translatedBody: row.translated_body || null,
+    translationLanguage: row.translation_language || null,
     createdAt: row.created_at
   };
 }
@@ -135,6 +138,9 @@ function toConversationSummary(row) {
     assigneeName: row.assignee_display_name || "",
     assigneeUsername: row.assignee_username || "",
     assignedAt: row.assigned_at || null,
+    detectedLanguage: row.detected_language || null,
+    firstResponseAt: row.first_response_at || null,
+    resolvedAt: row.resolved_at || null,
     lastMessageAt: row.last_message_at,
     lastMessagePreview: row.last_message_preview || "",
     lastMessageDirection: row.last_message_direction || "",

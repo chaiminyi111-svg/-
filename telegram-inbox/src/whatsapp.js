@@ -1,6 +1,7 @@
 const crypto = require("node:crypto");
 const { withTransaction, getSetting, setSetting } = require("./db");
 const { getConversationById } = require("./store");
+const { autoAssignConversation } = require("./assignment");
 const { messagePreview, nowIso, toConversationSummary, toPublicMessage } = require("./util");
 
 class WhatsAppError extends Error {
@@ -171,7 +172,7 @@ function extractWhatsAppContent(message) {
   return { type: "unknown", body: "[WhatsApp 消息]", meta: { via: "whatsapp" } };
 }
 
-function createWhatsAppService({ db, config, logger, broadcaster }) {
+function createWhatsAppService({ db, config, logger, broadcaster, translate }) {
   const readStored = key => getSetting(db, "whatsapp_" + key, null);
   const storedKeys = ["token", "phone_number_id", "verify_token", "app_secret"];
   const hasStored = storedKeys.some(key => readStored(key) !== null);
@@ -264,13 +265,21 @@ function createWhatsAppService({ db, config, logger, broadcaster }) {
     else if (broadcaster && typeof broadcaster.broadcast === "function") broadcaster.broadcast(event);
   }
 
-  function ingestMessage(message, contact) {
+  async function ingestMessage(message, contact) {
     if (!message?.from || !message?.id) return null;
 
     const from = String(message.from);
     const externalId = "wa:" + from;
     const contactName = String(contact?.profile?.name || "").trim() || "+" + from;
     const content = extractWhatsAppContent(message);
+    let translation = null;
+    if (translate?.configured?.() && (content.type === "text" || content.meta?.caption)) {
+      try {
+        translation = await translate.translateInbound(content.body);
+      } catch (error) {
+        logger?.warn("WhatsApp 入站消息翻译失败", error.message);
+      }
+    }
     const createdAt = new Date(
       Number(message.timestamp || Math.floor(Date.now() / 1000)) * 1000
     ).toISOString();
@@ -294,6 +303,7 @@ function createWhatsAppService({ db, config, logger, broadcaster }) {
         conversation = db.prepare(
           "SELECT * FROM conversations WHERE telegram_chat_id = ?"
         ).get(externalId);
+        autoAssignConversation(db, conversation.id, config);
         created = true;
       } else {
         db.prepare(
@@ -306,8 +316,8 @@ function createWhatsAppService({ db, config, logger, broadcaster }) {
       const insert = db.prepare(
         `INSERT OR IGNORE INTO messages
            (conversation_id, telegram_message_id, direction, sender_id, sender_name,
-            body, message_type, meta_json, created_at)
-         VALUES (?, ?, 'in', NULL, ?, ?, ?, ?, ?)`
+            body, message_type, meta_json, language, translated_body, translation_language, created_at)
+         VALUES (?, ?, 'in', NULL, ?, ?, ?, ?, ?, ?, ?, ?)`
       ).run(
         conversation.id,
         waMessageId,
@@ -315,11 +325,19 @@ function createWhatsAppService({ db, config, logger, broadcaster }) {
         content.body,
         content.type,
         JSON.stringify(content.meta),
+        translation?.language || null,
+        translation?.translatedBody || null,
+        translation?.translationLanguage || null,
         createdAt
       );
       const changed = Number(insert.changes) > 0;
 
       if (changed) {
+        if (translation?.language) {
+          db.prepare(
+            "UPDATE conversations SET detected_language = ? WHERE id = ?"
+          ).run(translation.language, conversation.id);
+        }
         db.prepare(
           `UPDATE conversations
            SET last_message_at = ?,
@@ -349,7 +367,7 @@ function createWhatsAppService({ db, config, logger, broadcaster }) {
     return { ...result, conversation, message: publicMessage };
   }
 
-  function ingestWebhook(payload) {
+  async function ingestWebhook(payload) {
     let count = 0;
     for (const entry of Array.isArray(payload?.entry) ? payload.entry : []) {
       for (const change of Array.isArray(entry.changes) ? entry.changes : []) {
@@ -367,7 +385,7 @@ function createWhatsAppService({ db, config, logger, broadcaster }) {
         );
         for (const message of Array.isArray(value.messages) ? value.messages : []) {
           try {
-            ingestMessage(message, contacts.get(String(message.from)));
+            await ingestMessage(message, contacts.get(String(message.from)));
             count += 1;
           } catch (error) {
             logger?.error("处理 WhatsApp 消息失败", error.message);
@@ -378,12 +396,16 @@ function createWhatsAppService({ db, config, logger, broadcaster }) {
     return count;
   }
 
-  async function sendReply(conversation, text, user) {
+  async function sendReply(conversation, text, user, options = {}) {
     if (!client.configured) {
       throw new WhatsAppError("未配置 WHATSAPP_TOKEN / WHATSAPP_PHONE_NUMBER_ID，暂时无法发送消息", "NOT_CONFIGURED");
     }
+    const prepared = translate?.prepareOutbound
+      ? await translate.prepareOutbound(text, options.targetLanguage, conversation)
+      : { text, language: null, meta: {} };
+    const outboundText = prepared.text;
     const to = String(conversation.telegram_chat_id).replace(/^wa:/, "");
-    const sent = await client.sendText(to, text);
+    const sent = await client.sendText(to, outboundText);
     const waMessageId = "wa:" + String(sent?.id || crypto.randomUUID());
     const createdAt = nowIso();
     const now = nowIso();
@@ -392,15 +414,16 @@ function createWhatsAppService({ db, config, logger, broadcaster }) {
       const insert = db.prepare(
         `INSERT INTO messages
            (conversation_id, telegram_message_id, direction, sender_id, sender_name,
-            body, message_type, meta_json, created_at)
-         VALUES (?, ?, 'out', ?, ?, ?, 'text', ?, ?)`
+            body, message_type, meta_json, language, created_at)
+         VALUES (?, ?, 'out', ?, ?, ?, 'text', ?, ?, ?)`
       ).run(
         conversation.id,
         waMessageId,
         user.id,
         user.displayName,
-        text,
-        JSON.stringify({ via: "whatsapp" }),
+        outboundText,
+        JSON.stringify({ via: "whatsapp", ...prepared.meta }),
+        prepared.language || null,
         createdAt
       );
 
@@ -409,9 +432,10 @@ function createWhatsAppService({ db, config, logger, broadcaster }) {
          SET last_message_at = ?,
              last_message_preview = ?,
              last_message_direction = 'out',
+             first_response_at = COALESCE(first_response_at, ?),
              updated_at = ?
          WHERE id = ?`
-      ).run(createdAt, messagePreview(text), now, conversation.id);
+      ).run(createdAt, messagePreview(outboundText), now, now, conversation.id);
 
       return Number(insert.lastInsertRowid);
     });
