@@ -4,6 +4,7 @@ const { openDatabase, bootstrapAdmin } = require("./src/db");
 const { createBroadcaster } = require("./src/realtime");
 const { createTelegramService } = require("./src/telegram");
 const { createWhatsAppService } = require("./src/whatsapp");
+const { createWhatsAppWebService } = require("./src/whatsapp-web");
 const { createTranslateService } = require("./src/translate");
 const { createAIService } = require("./src/ai");
 const { createApp } = require("./src/app");
@@ -29,24 +30,29 @@ async function main() {
   const hooks = {};
   const telegram = createTelegramService({ db, config, logger, broadcaster, translate, hooks });
   const whatsapp = createWhatsAppService({ db, config, logger, broadcaster, translate, hooks });
+  const whatsappWeb = createWhatsAppWebService({ db, config, logger, broadcaster, translate, hooks });
   const ai = createAIService({
     db,
     config,
     logger,
     broadcaster,
     sendReply: (conversation, text, user, options) => {
-      const service = (conversation.channel || "telegram") === "whatsapp" ? whatsapp : telegram;
+      const channel = conversation.channel || "telegram";
+      const service = channel === "whatsapp" ? whatsapp
+        : channel === "whatsapp_web" ? whatsappWeb
+          : telegram;
       return service.sendReply(conversation, text, user, options);
     }
   });
   hooks.onInbound = event => ai.handleInbound(event);
-  const app = createApp({ db, config, telegram, whatsapp, broadcaster, logger, translate, ai });
+  const app = createApp({ db, config, telegram, whatsapp, whatsappWeb, broadcaster, logger, translate, ai });
 
   const server = app.listen(config.port, config.host, () => {
     logger.info(`Telegram 客服收件箱已启动：http://${config.host}:${config.port}`);
     logger.info(`数据库：${config.dbPath}`);
     logger.info(`Telegram Bot：${telegram.configured ? "已配置" : "未配置（只能查看已有数据）"}`);
     logger.info(`WhatsApp Cloud API：${whatsapp.configured ? "已配置" : "未配置"}`);
+    logger.info(`WhatsApp 个人号：${whatsappWeb.status().enabled ? (whatsappWeb.configured ? "已登录" : "已启用，等待扫码") : "未启用"}`);
     logger.info(`Google 翻译：${translate.configured() ? "已配置" : "未配置"}`);
     logger.info(`AI 自动回复：${ai.configured() ? (ai.status().enabled ? "已启用" : "已配置，总开关关闭") : "未配置"}`);
   });
@@ -62,6 +68,10 @@ async function main() {
     logger.error("Telegram 轮询启动失败", error.message);
   });
 
+  whatsappWeb.start().catch(error => {
+    logger.error("WhatsApp 个人号启动失败", error.message);
+  });
+
   let shuttingDown = false;
   async function shutdown(signal) {
     if (shuttingDown) return;
@@ -69,7 +79,7 @@ async function main() {
     logger.info(`收到 ${signal}，正在关闭服务…`);
     ai.close();
     broadcaster.close();
-    await telegram.stop();
+    await Promise.allSettled([telegram.stop(), whatsappWeb.stop()]);
     server.close(() => {
       try {
         db.close();

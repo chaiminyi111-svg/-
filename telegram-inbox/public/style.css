@@ -1027,6 +1027,28 @@ textarea {
 .channel-help p + p { margin-top: 5px; }
 .channel-help code { white-space: normal; word-break: break-all; }
 
+.qr-wrap {
+  margin-top: 12px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 11px;
+  background: #fff;
+  text-align: center;
+}
+
+.qr-wrap img {
+  display: block;
+  width: min(100%, 320px);
+  height: auto;
+  margin: 0 auto 8px;
+  border-radius: 8px;
+}
+
+.qr-wrap p {
+  color: #4b5563;
+  font-size: 11px;
+}
+
 .modal-head {
   display: flex;
   align-items: flex-start;
@@ -1625,6 +1647,7 @@ textarea {
 }
 .channel-chip.telegram { background: #e8f4fb; color: #167fa8; }
 .channel-chip.whatsapp { background: #e8f8ef; color: #128c4a; }
+.channel-chip.whatsapp_web { background: #e6f7f4; color: #0f766e; }
 
 /* ---------- Translation ---------- */
 .chat-language {
@@ -2544,6 +2567,7 @@ input:focus, select:focus, textarea:focus {
 .unread-badge { background: var(--ui-accent); color: var(--ui-accent-ink); }
 .channel-chip.telegram { background: var(--ui-accent-soft); color: var(--ui-accent-2); }
 .channel-chip.whatsapp { background: rgba(30, 180, 110, .14); color: var(--green); }
+.channel-chip.whatsapp_web { background: rgba(13, 148, 136, .16); color: #5eead4; }
 .list-empty { color: var(--ui-sidebar-muted); }
 .list-empty strong { color: var(--ui-sidebar-ink); }
 

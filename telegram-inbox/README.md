@@ -2,12 +2,13 @@
 
 一个可私有化部署的多渠道客服工作台，适合小团队集中接收 Telegram / WhatsApp 消息、分配客服、跟进客户并统一回复。
 
-这是「海外聚合客服」方向的 MVP：当前支持 Telegram 和 WhatsApp Cloud API 两个渠道，后续可以按同样的渠道适配器模式扩展 Instagram、Line 等平台。
+这是「海外聚合客服」方向的 MVP：当前支持 Telegram、WhatsApp Cloud API 和 WhatsApp 个人号（Web 扫码）三个渠道，后续可以按同样的渠道适配器模式扩展 Instagram、Line 等平台。
 
 ## 已实现功能
 
 - Telegram Bot 长轮询收消息，无需公网 webhook
 - WhatsApp Cloud API webhook 收消息，支持文本回复；出站消息展示已发送/已送达/已读回执
+- WhatsApp 个人号（WhatsApp Web / Baileys，实验渠道）：管理员扫码登录，收私聊文本并回复，session 保存在本地
 - 消息回执：出站消息下方显示单勾（已发送）和双勾（已送达/对方已读）；Telegram Bot API 不提供已读回执，WhatsApp 支持
 - 界面风格：顶栏「外观」提供 6 套主题（夕阳橙默认、熔岩红、森林绿、夜樱粉、深海蓝、暖纸白），保存在当前浏览器
 - 统一收件箱：私聊、群聊、未读计数、已读/未读状态、手动标记未读、消息预览、渠道标识
@@ -53,6 +54,7 @@ telegram-inbox/
 │   ├── store.js           # 会话/消息查询、统计
 │   ├── telegram.js        # Telegram Bot 长轮询、收发消息、媒体
 │   ├── whatsapp.js        # WhatsApp Cloud API webhook、文本收发
+│   ├── whatsapp-web.js    # WhatsApp 个人号（Baileys）扫码、私聊收发
 │   ├── translate.js       # Google Cloud Translation 识别与翻译
 │   ├── ai.js              # OpenAI 兼容 AI 自动回复、建议与模式
 │   ├── assignment.js      # 新会话自动分配
@@ -139,6 +141,33 @@ WHATSAPP_APP_SECRET=Meta应用密钥
 - Webhook 必须可被 Meta 访问，通常需要公网 HTTPS；内网部署需要反向代理或内网穿透。
 - `WHATSAPP_APP_SECRET` 用于校验 `X-Hub-Signature-256`；生产环境必须配置，否则 Webhook 会拒绝请求。
 - WhatsApp 的 Token 和 App Secret 同样不要发到聊天或提交到 Git。
+
+## 配置 WhatsApp 个人号（实验）
+
+WhatsApp 个人号通过 Baileys 连接 WhatsApp Web，不需要 Meta 应用和公网 webhook，适合先用测试号验证流程。
+
+> 这是非官方接入方式，存在账号被限制或封禁的风险；生产环境请优先使用上面的 WhatsApp Cloud API。建议只使用测试号，不要让重要业务号码登录。
+
+1. 在 `.env` 中启用并重启服务：
+
+   ```dotenv
+   WHATSAPP_WEB_ENABLED=true
+   # 可选，默认 $DATA_DIR/whatsapp-web
+   WHATSAPP_WEB_SESSION_PATH=
+   ```
+
+2. 用管理员账号登录，打开顶栏「渠道」，在「WhatsApp 个人号（Web 扫码）」区域点击「生成登录二维码」。
+3. 手机 WhatsApp → 设置 → 已关联的设备 → 关联设备，扫描页面上的二维码。
+4. 连接成功后，客户发来的私聊文本会进入统一收件箱；在会话里回复即可通过个人号发出。
+5. 需要更换账号时点击「退出登录」，会清除本地 session 并要求重新扫码。
+
+注意：
+
+- 只处理**私聊文本**；群聊、状态广播、自己发出的消息会被忽略。入站图片/文件显示占位文本，出站附件暂未开放。
+- 登录 session 保存在 `WHATSAPP_WEB_SESSION_PATH`，等同于该账号的登录凭证。目录权限会设置为 `700`、文件为 `600`；不要提交到 Git、不要打包分享，备份时按密钥处理。
+- 二维码只通过管理员接口返回给当前页面，不写入日志；仍请避免在公开场合投屏或截图。
+- 连接断开后会自动重连；登录失效（被手机端退出）需要重新扫码。
+- 当前未实现消息历史同步，只接收服务在线期间的新消息。
 
 ## 配置 Telegram Bot
 
@@ -265,6 +294,8 @@ TRUST_PROXY=true
 | `WHATSAPP_VERIFY_TOKEN` | 空 | Meta Webhook 校验串；也可在「渠道」页面保存 |
 | `WHATSAPP_APP_SECRET` | 空 | Meta 应用密钥，用于 Webhook 验签；也可在「渠道」页面保存 |
 | `WHATSAPP_API_BASE` | `https://graph.facebook.com/v20.0` | Meta Graph API 地址 |
+| `WHATSAPP_WEB_ENABLED` | `false` | 是否启用 WhatsApp 个人号（实验渠道） |
+| `WHATSAPP_WEB_SESSION_PATH` | `$DATA_DIR/whatsapp-web` | WhatsApp 个人号 session 目录，等同于登录凭证 |
 | `GOOGLE_TRANSLATE_API_KEY` | 空 | Google Cloud Translation API Key；也可在「渠道」页面保存 |
 | `GOOGLE_TRANSLATE_API_BASE` | `https://translation.googleapis.com` | Google 翻译 API 地址 |
 | `TRANSLATE_PROVIDER` | `google` | `google`（官方 API，需要 Key）/ `google-web` / `google-web-main` / `google-chrome` / `mymemory`（无需 Key） |
@@ -341,7 +372,8 @@ sqlite3 data/inbox.db ".backup 'data/inbox-backup.db'"
 ## 已知限制
 
 - Telegram 支持文本、图片、文件发送；入站语音/视频可查看，出站语音/视频暂未开放。
-- WhatsApp 目前只支持文本收发；不支持出站附件，且受 24 小时客服窗口限制。
+- WhatsApp Cloud API 目前只支持文本收发；不支持出站附件，且受 24 小时客服窗口限制。
+- WhatsApp 个人号（实验）只处理私聊文本；群聊/状态广播会被忽略，非官方接入有封号风险，且不保证长期可用。
 - 出站附件上限 20MB；Telegram Bot API 下载文件通常也限制在 20MB 内。
 - 统计看板是基础版，暂未计算平均首响、满意度等指标。
 - Snapchat 没有公开的双向客服消息 API（Marketing API 主要面向广告，Snap Kit 面向登录/分享），因此暂不能像 Telegram/WhatsApp 一样直接接入；如果你指的是其他平台，请确认名称。
@@ -354,7 +386,7 @@ sqlite3 data/inbox.db ".backup 'data/inbox-backup.db'"
 npm test
 ```
 
-测试会启动 mock Telegram API、mock WhatsApp API、mock Google 翻译 API 和 mock OpenAI 兼容接口，覆盖登录、收消息、分配权限、客服会话可见范围、SSE 推送过滤、文本回复、出站图片/文件、媒体代理、WhatsApp webhook 验签与回复、管理员渠道凭据保存/清除、Google 翻译识别与出站翻译、多免费翻译通道切换、AI 权限与自动回复/建议/仅首次模式、已读/未读与 WhatsApp 回执、自动分配与接待上限、SLA 统计、CSV 导出、快捷回复、客户标签/备注、搜索、CSRF、角色校验和最后管理员保护，不需要真实平台凭据。
+测试会启动 mock Telegram API、mock WhatsApp API、mock Google 翻译 API 和 mock OpenAI 兼容接口，覆盖登录、收消息、分配权限、客服会话可见范围、SSE 推送过滤、文本回复、出站图片/文件、媒体代理、WhatsApp webhook 验签与回复、WhatsApp 个人号扫码/私聊收发/退出（使用假 socket）、管理员渠道凭据保存/清除、Google 翻译识别与出站翻译、多免费翻译通道切换、AI 权限与自动回复/建议/仅首次模式、已读/未读与 WhatsApp 回执、自动分配与接待上限、SLA 统计、CSV 导出、快捷回复、客户标签/备注、搜索、CSRF、角色校验和最后管理员保护，不需要真实平台凭据。
 
 ## 后续路线
 

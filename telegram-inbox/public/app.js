@@ -122,7 +122,8 @@ const state = {
   translate: { configured: false, source: "none", languages: [], defaultTarget: "zh-CN" },
   replyLanguages: {},
   assignment: { enabled: false, strategy: "least_active", maxActive: 0 },
-  channels: { telegram: null, whatsapp: null, translate: null, ai: null },
+  channels: { telegram: null, whatsapp: null, whatsappWeb: null, translate: null, ai: null },
+  whatsappWebPollTimer: null,
   ai: {
     configured: false,
     globalEnabled: false,
@@ -136,6 +137,7 @@ const state = {
   aiSuggestion: null,
   telegramConfigured: false,
   whatsappConfigured: false,
+  whatsappWebConfigured: false,
   eventSource: null,
   sseConnected: false,
   fallbackTimer: null,
@@ -232,6 +234,7 @@ async function boot() {
     const health = await api("/api/health");
     state.telegramConfigured = Boolean(health.telegramConfigured);
     state.whatsappConfigured = Boolean(health.whatsappConfigured);
+    state.whatsappWebConfigured = Boolean(health.whatsappWebConfigured && health.whatsappWebRunning);
     const data = await api("/api/auth/me");
     state.me = data.user;
     await enterInbox();
@@ -331,7 +334,7 @@ function showLogin() {
   state.viewerDays = 1;
   state.translate = { configured: false, source: "none", languages: [], defaultTarget: "zh-CN" };
   state.replyLanguages = {};
-  state.channels = { telegram: null, whatsapp: null, translate: null };
+  state.channels = { telegram: null, whatsapp: null, whatsappWeb: null, translate: null, ai: null };
   state.cannedReplies = [];
   state.editingCannedId = null;
   state.customerTags = [];
@@ -339,7 +342,7 @@ function showLogin() {
   $("#chatPanel").hidden = true;
   $("#chatEmpty").hidden = false;
   renderAiSuggestion();
-  document.title = "聚合客服台 · Telegram 统一收件箱";
+  document.title = "聚合客服台 · 多渠道收件箱";
   setTimeout(() => $("#loginUsername")?.focus(), 50);
 }
 
@@ -461,9 +464,9 @@ function renderConversationList() {
       ? "没有找到匹配的会话，试试其他关键词。"
       : state.me.role === "agent"
         ? "管理员分配会话后，会显示在这里。"
-        : (state.telegramConfigured || state.whatsappConfigured)
+        : (state.telegramConfigured || state.whatsappConfigured || state.whatsappWebConfigured)
           ? "在 Telegram 或 WhatsApp 里给客户发一条消息，就会出现在这里。"
-          : "配置 TELEGRAM_BOT_TOKEN 或 WHATSAPP_* 并重启服务后，消息会出现在这里。";
+          : "配置 TELEGRAM_BOT_TOKEN 或 WHATSAPP_*，或在「渠道」中扫码登录 WhatsApp 个人号，消息会出现在这里。";
     updateDocumentTitle();
     return;
   }
@@ -503,7 +506,9 @@ function renderConversationList() {
     meta.className = "conversation-meta";
     const channel = document.createElement("span");
     channel.className = "channel-chip " + (conversation.channel || "telegram");
-    channel.textContent = conversation.channel === "whatsapp" ? "WA" : "TG";
+    channel.textContent = conversation.channel === "whatsapp"
+      ? "WA"
+      : conversation.channel === "whatsapp_web" ? "WAW" : "TG";
     channel.title = channelLabel(conversation.channel);
     meta.appendChild(channel);
     if (conversation.assigneeName) {
@@ -753,7 +758,7 @@ function appendMessageContent(bubble, message) {
   const meta = message.meta || {};
   const body = String(message.body || "");
   const mediaUrl = `/api/messages/${encodeURIComponent(message.id)}/media`;
-  const canProxyMedia = (state.active?.channel || "telegram") !== "whatsapp" && state.telegramConfigured;
+  const canProxyMedia = (state.active?.channel || "telegram") === "telegram" && state.telegramConfigured;
 
   if (type === "photo") {
     if (canProxyMedia) {
@@ -1018,12 +1023,15 @@ function renderAssigneeOptions(conversation) {
 
 function channelLabel(channel) {
   if (channel === "whatsapp") return "WhatsApp";
+  if (channel === "whatsapp_web") return "WhatsApp 个人号";
   return "Telegram";
 }
 
 function activeChannelConfigured() {
   const channel = state.active?.channel || "telegram";
-  return channel === "whatsapp" ? state.whatsappConfigured : state.telegramConfigured;
+  if (channel === "whatsapp") return state.whatsappConfigured;
+  if (channel === "whatsapp_web") return state.whatsappWebConfigured;
+  return state.telegramConfigured;
 }
 
 function renderTelegramState() {
@@ -1034,7 +1042,9 @@ function renderTelegramState() {
   $("#setupHint").hidden = configured;
   $("#telegramWarning").textContent = channel === "whatsapp"
     ? "未配置 WhatsApp 凭据，当前只能查看本地数据，无法发送回复。请让管理员在「渠道」中配置。"
-    : "未配置 Telegram Bot Token，当前只能查看本地数据，无法发送回复。请让管理员在「渠道」中配置。";
+    : channel === "whatsapp_web"
+      ? "WhatsApp 个人号未登录或连接已断开，当前只能查看本地数据，无法发送回复。请让管理员在「渠道」中扫码。"
+      : "未配置 Telegram Bot Token，当前只能查看本地数据，无法发送回复。请让管理员在「渠道」中配置。";
 
   const input = $("#messageInput");
   const send = $("#sendBtn");
@@ -1042,7 +1052,7 @@ function renderTelegramState() {
   input.disabled = !configured;
   send.disabled = !configured || state.sending || state.uploading;
   if (attach) {
-    attach.hidden = channel === "whatsapp";
+    attach.hidden = channel !== "telegram";
     attach.disabled = !configured || state.uploading;
   }
   input.placeholder = configured
@@ -1958,6 +1968,123 @@ function renderWhatsAppSettings() {
   $("#whatsappWebhookUrl").textContent = location.origin + "/webhook/whatsapp";
 }
 
+function renderWhatsAppWebSettings() {
+  const settings = state.channels.whatsappWeb || {};
+  const enabled = Boolean(settings.enabled);
+  const configured = Boolean(settings.configured);
+  const running = Boolean(settings.running);
+  const loginInProgress = Boolean(settings.loginInProgress);
+  const me = settings.me;
+
+  $("#whatsappWebDot").className = "channel-dot " + (running ? "on" : "off");
+  let text;
+  if (!enabled) {
+    text = "未启用，需要设置 WHATSAPP_WEB_ENABLED=true";
+  } else if (running) {
+    text = "已连接";
+    if (me?.name) text += ` ${me.name}`;
+    if (me?.phone) text += ` · ${me.phone}`;
+  } else if (loginInProgress) {
+    text = settings.qr ? "等待手机扫码…" : "正在生成二维码…";
+  } else if (configured) {
+    text = "已登录，等待重新连接";
+  } else {
+    text = "未登录，点击下方按钮生成二维码";
+  }
+  if (settings.error && !running) text += `：${settings.error}`;
+  $("#whatsappWebStatusText").textContent = text;
+
+  const loginBtn = $("#whatsappWebLoginBtn");
+  loginBtn.hidden = running || loginInProgress;
+  loginBtn.disabled = !enabled;
+  loginBtn.textContent = configured ? "重新连接" : "生成登录二维码";
+
+  const logoutBtn = $("#whatsappWebLogoutBtn");
+  logoutBtn.hidden = !configured && !running && !loginInProgress;
+  logoutBtn.disabled = !enabled;
+
+  const qrWrap = $("#whatsappWebQrWrap");
+  const qrImage = $("#whatsappWebQr");
+  if (settings.qr) {
+    qrImage.src = settings.qr;
+    qrWrap.hidden = false;
+  } else {
+    qrImage.removeAttribute("src");
+    qrWrap.hidden = true;
+  }
+}
+
+function stopWhatsAppWebPolling() {
+  if (state.whatsappWebPollTimer) {
+    clearTimeout(state.whatsappWebPollTimer);
+    state.whatsappWebPollTimer = null;
+  }
+}
+
+async function refreshWhatsAppWebStatus() {
+  const data = await api("/api/admin/whatsapp-web");
+  state.channels.whatsappWeb = data.whatsappWeb;
+  state.whatsappWebConfigured = Boolean(data.whatsappWeb.configured && data.whatsappWeb.running);
+  renderWhatsAppWebSettings();
+  renderTelegramState();
+  return data.whatsappWeb;
+}
+
+function scheduleWhatsAppWebPoll() {
+  stopWhatsAppWebPolling();
+  const settings = state.channels.whatsappWeb;
+  if (!settings?.loginInProgress) return;
+  state.whatsappWebPollTimer = setTimeout(async () => {
+    try {
+      await refreshWhatsAppWebStatus();
+    } catch (error) {
+      setChannelError("whatsappWebError", error.message);
+    }
+    scheduleWhatsAppWebPoll();
+  }, 2000);
+}
+
+async function beginWhatsAppWebLogin() {
+  const button = $("#whatsappWebLoginBtn");
+  button.disabled = true;
+  button.textContent = "正在生成…";
+  setChannelError("whatsappWebError", "");
+  try {
+    const data = await api("/api/admin/whatsapp-web/login", { method: "POST", body: {} });
+    state.channels.whatsappWeb = data.whatsappWeb;
+    state.whatsappWebConfigured = Boolean(data.whatsappWeb.configured && data.whatsappWeb.running);
+    renderWhatsAppWebSettings();
+    renderTelegramState();
+    showToast("二维码已生成，请用手机 WhatsApp 扫描", "success");
+    scheduleWhatsAppWebPoll();
+  } catch (error) {
+    setChannelError("whatsappWebError", error.message);
+  } finally {
+    button.disabled = false;
+    renderWhatsAppWebSettings();
+  }
+}
+
+async function logoutWhatsAppWeb() {
+  if (!window.confirm("确定退出 WhatsApp 个人号？退出后需要重新扫码。")) return;
+  const button = $("#whatsappWebLogoutBtn");
+  button.disabled = true;
+  setChannelError("whatsappWebError", "");
+  stopWhatsAppWebPolling();
+  try {
+    const data = await api("/api/admin/whatsapp-web/logout", { method: "POST", body: {} });
+    state.channels.whatsappWeb = data.whatsappWeb;
+    state.whatsappWebConfigured = false;
+    renderWhatsAppWebSettings();
+    renderTelegramState();
+    showToast("WhatsApp 个人号已退出", "success");
+  } catch (error) {
+    setChannelError("whatsappWebError", error.message);
+  } finally {
+    button.disabled = false;
+  }
+}
+
 function renderTranslateSettings() {
   const settings = state.channels.translate || state.translate || {};
   const configured = Boolean(settings.configured);
@@ -2020,14 +2147,16 @@ async function saveTranslateProvider() {
 function renderChannelSettings() {
   renderTelegramSettings();
   renderWhatsAppSettings();
+  renderWhatsAppWebSettings();
   renderTranslateSettings();
   renderAiSettings();
 }
 
 async function loadChannelSettings() {
-  const [telegramResult, whatsappResult, translateResult, aiResult] = await Promise.allSettled([
+  const [telegramResult, whatsappResult, whatsappWebResult, translateResult, aiResult] = await Promise.allSettled([
     api("/api/admin/telegram"),
     api("/api/admin/whatsapp"),
+    api("/api/admin/whatsapp-web"),
     api("/api/admin/translate"),
     api("/api/admin/ai")
   ]);
@@ -2048,6 +2177,18 @@ async function loadChannelSettings() {
     setChannelError("whatsappError", whatsappResult.reason.message);
     $("#whatsappDot").className = "channel-dot off";
     $("#whatsappStatusText").textContent = "读取配置失败";
+  }
+
+  if (whatsappWebResult.status === "fulfilled") {
+    state.channels.whatsappWeb = whatsappWebResult.value.whatsappWeb;
+    state.whatsappWebConfigured = Boolean(
+      whatsappWebResult.value.whatsappWeb.configured && whatsappWebResult.value.whatsappWeb.running
+    );
+    scheduleWhatsAppWebPoll();
+  } else {
+    setChannelError("whatsappWebError", whatsappWebResult.reason.message);
+    $("#whatsappWebDot").className = "channel-dot off";
+    $("#whatsappWebStatusText").textContent = "读取配置失败";
   }
 
   if (translateResult.status === "fulfilled") {
@@ -2073,6 +2214,7 @@ async function loadChannelSettings() {
 
 async function openChannelsModal() {
   if (state.me?.role !== "admin") return;
+  stopWhatsAppWebPolling();
   $("#channelsModal").hidden = false;
   $("#telegramTokenInput").value = "";
   $("#whatsappTokenInput").value = "";
@@ -2087,14 +2229,19 @@ async function openChannelsModal() {
   $("#aiClearBtn").hidden = true;
   $("#channelDot").className = "channel-dot";
   $("#whatsappDot").className = "channel-dot";
+  $("#whatsappWebDot").className = "channel-dot";
   $("#translateDot").className = "channel-dot";
   $("#aiDot").className = "channel-dot";
   $("#channelStatusText").textContent = "正在检查配置…";
   $("#whatsappStatusText").textContent = "正在检查配置…";
+  $("#whatsappWebStatusText").textContent = "正在检查配置…";
+  $("#whatsappWebQrWrap").hidden = true;
+  $("#whatsappWebQr").removeAttribute("src");
   $("#translateStatusText").textContent = "正在检查配置…";
   $("#aiStatusText").textContent = "正在检查配置…";
   setChannelError("channelError", "");
   setChannelError("whatsappError", "");
+  setChannelError("whatsappWebError", "");
   setChannelError("translateError", "");
   setChannelError("aiError", "");
   await loadChannelSettings();
@@ -2947,6 +3094,7 @@ function bindEvents() {
   $("#viewerAppearanceBtn").addEventListener("click", openAppearanceModal);
   $("#loginThemeBtn").addEventListener("click", openAppearanceModal);
   $("#channelsAppearanceBtn").addEventListener("click", () => {
+    stopWhatsAppWebPolling();
     $("#channelsModal").hidden = true;
     openAppearanceModal();
   });
@@ -2956,9 +3104,15 @@ function bindEvents() {
   });
 
   $("#channelsBtn").addEventListener("click", openChannelsModal);
-  $("#channelsClose").addEventListener("click", () => { $("#channelsModal").hidden = true; });
+  $("#channelsClose").addEventListener("click", () => {
+    stopWhatsAppWebPolling();
+    $("#channelsModal").hidden = true;
+  });
   $("#channelsModal").addEventListener("click", event => {
-    if (event.target === $("#channelsModal")) $("#channelsModal").hidden = true;
+    if (event.target === $("#channelsModal")) {
+      stopWhatsAppWebPolling();
+      $("#channelsModal").hidden = true;
+    }
   });
   $("#aiForm").addEventListener("submit", saveAiSettings);
   $("#aiPreset").addEventListener("change", applyAiPreset);
@@ -2992,6 +3146,8 @@ function bindEvents() {
   $("#telegramClearBtn").addEventListener("click", clearTelegramToken);
   $("#whatsappForm").addEventListener("submit", saveWhatsAppCredentials);
   $("#whatsappClearBtn").addEventListener("click", clearWhatsAppCredentials);
+  $("#whatsappWebLoginBtn").addEventListener("click", beginWhatsAppWebLogin);
+  $("#whatsappWebLogoutBtn").addEventListener("click", logoutWhatsAppWeb);
   $("#translateForm").addEventListener("submit", saveTranslateKey);
   $("#translateProvider").addEventListener("change", saveTranslateProvider);
   $("#translateClearBtn").addEventListener("click", clearTranslateKey);

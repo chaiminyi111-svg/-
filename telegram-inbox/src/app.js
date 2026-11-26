@@ -43,7 +43,7 @@ function parseId(value) {
   return Number.isFinite(id) && id > 0 ? id : null;
 }
 
-function createApp({ db, config, telegram, whatsapp, broadcaster, logger, translate, ai }) {
+function createApp({ db, config, telegram, whatsapp, whatsappWeb, broadcaster, logger, translate, ai }) {
   const app = express();
   app.disable("x-powered-by");
   app.set("trust proxy", config.trustProxy ? 1 : false);
@@ -147,6 +147,9 @@ function createApp({ db, config, telegram, whatsapp, broadcaster, logger, transl
       version: VERSION,
       telegramConfigured: Boolean(telegram?.configured),
       whatsappConfigured: Boolean(whatsapp?.configured),
+      whatsappWebEnabled: Boolean(whatsappWeb?.status?.().enabled),
+      whatsappWebConfigured: Boolean(whatsappWeb?.configured),
+      whatsappWebRunning: Boolean(whatsappWeb?.running),
       translationConfigured: Boolean(translate?.configured?.()),
       aiConfigured: Boolean(ai?.configured?.()),
       aiEnabled: Boolean(ai?.status?.().enabled),
@@ -640,6 +643,34 @@ function createApp({ db, config, telegram, whatsapp, broadcaster, logger, transl
     });
   }));
 
+  app.get("/api/admin/whatsapp-web", requireAdmin, (req, res) => {
+    if (!whatsappWeb) return jsonError(res, 503, "WhatsApp 个人号服务未启动");
+    res.json({ whatsappWeb: whatsappWeb.status() });
+  });
+
+  app.post("/api/admin/whatsapp-web/login", requireAdmin, asyncRoute(async (req, res) => {
+    if (!whatsappWeb) return jsonError(res, 503, "WhatsApp 个人号服务未启动");
+    try {
+      const result = await whatsappWeb.beginLogin();
+      audit(db, req.user.id, "whatsapp_web.login_started", "channel", "whatsapp_web");
+      res.json({ ok: true, whatsappWeb: result });
+    } catch (error) {
+      const status = error.code === "NOT_CONFIGURED" ? 400 : 502;
+      return jsonError(res, status, error.message || "启动 WhatsApp 个人号登录失败");
+    }
+  }));
+
+  app.post("/api/admin/whatsapp-web/logout", requireAdmin, asyncRoute(async (req, res) => {
+    if (!whatsappWeb) return jsonError(res, 503, "WhatsApp 个人号服务未启动");
+    try {
+      const result = await whatsappWeb.logout();
+      audit(db, req.user.id, "whatsapp_web.logged_out", "channel", "whatsapp_web");
+      res.json({ ok: true, whatsappWeb: result });
+    } catch (error) {
+      return jsonError(res, 502, error.message || "退出 WhatsApp 个人号失败");
+    }
+  }));
+
   app.get("/api/conversations", requireAuth, (req, res) => {
     const result = listConversations(db, {
       scope: req.query.scope,
@@ -716,11 +747,15 @@ function createApp({ db, config, telegram, whatsapp, broadcaster, logger, transl
     }
     const channel = conversation.channel || "telegram";
     const targetLanguage = String(req.body?.targetLanguage || "auto").slice(0, 20);
-    const service = channel === "whatsapp" ? whatsapp : telegram;
+    const service = channel === "whatsapp" ? whatsapp
+      : channel === "whatsapp_web" ? whatsappWeb
+        : telegram;
     if (!service?.configured) {
       return jsonError(res, 503, channel === "whatsapp"
         ? "未配置 WhatsApp Cloud API 凭据，暂时无法发送消息"
-        : "未配置 TELEGRAM_BOT_TOKEN，暂时无法发送消息");
+        : channel === "whatsapp_web"
+          ? "WhatsApp 个人号未登录，请管理员在「渠道」中扫码"
+          : "未配置 TELEGRAM_BOT_TOKEN，暂时无法发送消息");
     }
 
     try {

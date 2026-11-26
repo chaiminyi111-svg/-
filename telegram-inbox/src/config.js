@@ -38,6 +38,10 @@ const config = {
   whatsappVerifyToken: (process.env.WHATSAPP_VERIFY_TOKEN || "").trim(),
   whatsappAppSecret: (process.env.WHATSAPP_APP_SECRET || "").trim(),
   whatsappApiBase: (process.env.WHATSAPP_API_BASE || "https://graph.facebook.com/v20.0").replace(/\/+$/, ""),
+  whatsappWebEnabled: readBool("WHATSAPP_WEB_ENABLED", false),
+  whatsappWebSessionPath: path.resolve(
+    process.env.WHATSAPP_WEB_SESSION_PATH || path.join(dataDir, "whatsapp-web")
+  ),
   googleTranslateApiKey: (process.env.GOOGLE_TRANSLATE_API_KEY || "").trim(),
   googleTranslateApiBase: (process.env.GOOGLE_TRANSLATE_API_BASE || "https://translation.googleapis.com").replace(/\/+$/, ""),
   googleTranslateWebApiBase: (process.env.GOOGLE_TRANSLATE_WEB_API_BASE || "https://translate.googleapis.com").replace(/\/+$/, ""),
