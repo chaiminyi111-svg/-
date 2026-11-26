@@ -2013,3 +2013,97 @@ textarea {
   border-color: #a9e2f7;
   box-shadow: inset 3px 0 0 #16b8e8;
 }
+
+/* ---------- AI assistant ---------- */
+.ai-card { width: min(560px, 100%); }
+.ai-create-check { margin: 0; }
+.ai-permission {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 6px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: #f8fbfd;
+  color: #566d83;
+  font-size: 10px;
+  white-space: nowrap;
+}
+.ai-permission input { width: 13px; height: 13px; accent-color: #1687b0; }
+.ai-form-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+.chat-ai-state {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 7px;
+  border: 1px solid rgba(80, 212, 255, .26);
+  border-radius: 999px;
+  background: rgba(0, 180, 240, .10);
+  color: #7fe5ff;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: .2px;
+  cursor: default;
+}
+.chat-ai-state.on {
+  border-color: rgba(50, 220, 150, .34);
+  background: rgba(25, 180, 112, .14);
+  color: #57e0a5;
+}
+.chat-ai-state.suggest {
+  border-color: rgba(255, 180, 90, .34);
+  background: rgba(255, 160, 60, .12);
+  color: #ffc16b;
+}
+.chat-ai-state.off {
+  border-color: rgba(120, 150, 170, .25);
+  background: rgba(120, 150, 170, .10);
+  color: #8ba8bb;
+}
+.chat-ai-state[title] { cursor: pointer; }
+.ai-suggestion {
+  flex: 0 0 auto;
+  margin: 0 20px 10px;
+  padding: 12px 14px;
+  border: 1px solid rgba(80, 212, 255, .28);
+  border-radius: 13px;
+  background: linear-gradient(135deg, rgba(8, 34, 53, .96), rgba(7, 24, 39, .96));
+  box-shadow: 0 12px 30px rgba(0, 0, 0, .18);
+  color: #d8f4ff;
+}
+.ai-suggestion-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 7px;
+}
+.ai-suggestion-head strong { color: #7fe5ff; font-size: 11px; letter-spacing: .3px; }
+.ai-suggestion-head span { color: #63879b; font-size: 10px; }
+.ai-suggestion p {
+  margin: 0;
+  color: #d8f4ff;
+  font-size: 13px;
+  line-height: 1.65;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.ai-suggestion-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 10px;
+}
+.ai-suggestion-actions .primary,
+.ai-suggestion-actions .ghost { min-height: 32px; padding: 0 12px; font-size: 11px; }
+.ai-suggestion-actions .ghost {
+  border-color: rgba(92, 197, 235, .22);
+  background: rgba(7, 28, 44, .92);
+  color: #a9cee0;
+}
+@media (max-width: 700px) {
+  .ai-form-grid { grid-template-columns: 1fr; }
+  .ai-suggestion { margin: 0 12px 8px; }
+}

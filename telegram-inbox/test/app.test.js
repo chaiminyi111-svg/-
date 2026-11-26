@@ -12,6 +12,7 @@ const { createBroadcaster } = require("../src/realtime");
 const { createTelegramService } = require("../src/telegram");
 const { createWhatsAppService } = require("../src/whatsapp");
 const { createTranslateService } = require("../src/translate");
+const { createAIService, isAfterHours } = require("../src/ai");
 const { autoAssignConversation, saveSettings } = require("../src/assignment");
 const { getStats } = require("../src/store");
 const { createApp } = require("../src/app");
@@ -217,6 +218,63 @@ function startMockTranslate() {
         calls
       });
     });
+  });
+}
+
+function startMockAI() {
+  const calls = [];
+  const server = http.createServer(async (req, res) => {
+    let body = "";
+    for await (const chunk of req) body += chunk;
+    const url = new URL(req.url, "http://127.0.0.1");
+    if (req.method !== "POST" || url.pathname !== "/v1/chat/completions") {
+      res.statusCode = 404;
+      res.end("{}");
+      return;
+    }
+    if (req.headers.authorization !== "Bearer test-ai-key") {
+      res.statusCode = 401;
+      res.setHeader("content-type", "application/json");
+      res.end(JSON.stringify({ error: { message: "bad key" } }));
+      return;
+    }
+    const payload = JSON.parse(body || "{}");
+    calls.push(payload);
+    const last = String(payload.messages?.at(-1)?.content || "");
+    let content = "您好，已经收到您的问题，我们会尽快为您处理。";
+    if (last.includes("退款")) content = "可以帮您核实退款进度，请提供订单号。";
+    if (last.includes("只回复：OK")) content = "OK";
+    res.setHeader("content-type", "application/json");
+    res.end(JSON.stringify({ choices: [{ message: { role: "assistant", content } }] }));
+  });
+  return new Promise(resolve => {
+    server.listen(0, "127.0.0.1", () => {
+      resolve({
+        server,
+        base: `http://127.0.0.1:${server.address().port}/v1`,
+        calls
+      });
+    });
+  });
+}
+
+function waitFor(check, timeout = 2500) {
+  return new Promise((resolve, reject) => {
+    const started = Date.now();
+    const timer = setInterval(() => {
+      try {
+        if (check()) {
+          clearInterval(timer);
+          resolve();
+        } else if (Date.now() - started > timeout) {
+          clearInterval(timer);
+          reject(new Error("等待条件超时"));
+        }
+      } catch (error) {
+        clearInterval(timer);
+        reject(error);
+      }
+    }, 20);
   });
 }
 
@@ -1638,4 +1696,241 @@ test("auto assignment respects capacity and stats track SLA", async t => {
   assert.equal(stats.totals.avgFirstResponseMinutes, 2);
   assert.equal(stats.totals.avgResolutionMinutes, 10);
   assert.equal(stats.totals.slaBreaches, 1);
+});
+
+test("AI auto reply respects permissions, suggestions and modes", async t => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "ai-inbox-test-"));
+  const mockTelegram = await startMockTelegram();
+  const mockAI = await startMockAI();
+  const config = {
+    root: path.resolve(__dirname, ".."),
+    dataDir: tempDir,
+    dbPath: path.join(tempDir, "test.db"),
+    port: 0,
+    host: "127.0.0.1",
+    nodeEnv: "test",
+    adminUsername: "admin",
+    adminPassword: "admin-pass-123",
+    adminDisplayName: "管理员",
+    telegramToken: "TEST",
+    telegramApiBase: mockTelegram.base,
+    telegramPollTimeout: 5,
+    telegramDeleteWebhook: false,
+    sessionDays: 7,
+    trustProxy: false,
+    cookieSecure: false,
+    publicOrigin: "",
+    maxMessageLength: 4096,
+    logLevel: "error",
+    aiEnabled: true,
+    aiApiKey: "test-ai-key",
+    aiBaseUrl: mockAI.base,
+    aiModel: "mock-model",
+    aiDefaultMode: "auto",
+    aiWorkStart: "09:00",
+    aiWorkEnd: "18:00",
+    aiWorkTimezone: "Asia/Shanghai",
+    aiIncludeGroups: false,
+    aiDelayMs: 5,
+    aiTimeoutMs: 3000,
+    aiMaxContext: 12
+  };
+
+  const logger = createLogger("error");
+  const db = openDatabase(config.dbPath);
+  bootstrapAdmin(db, config);
+  const broadcaster = createBroadcaster(logger);
+  const hooks = {};
+  const telegram = createTelegramService({ db, config, logger, broadcaster, hooks });
+  const ai = createAIService({
+    db,
+    config,
+    logger,
+    broadcaster,
+    sendReply: (conversation, text, user, options) => telegram.sendReply(conversation, text, user, options)
+  });
+  hooks.onInbound = event => ai.handleInbound(event);
+  const app = createApp({ db, config, telegram, broadcaster, logger, ai });
+  const server = await new Promise(resolve => {
+    const instance = app.listen(0, "127.0.0.1", () => resolve(instance));
+  });
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const now = Math.floor(Date.now() / 1000);
+
+  t.after(async () => {
+    ai.close();
+    await new Promise(resolve => server.close(resolve));
+    await telegram.stop();
+    broadcaster.close();
+    db.close();
+    await new Promise(resolve => mockTelegram.server.close(resolve));
+    await new Promise(resolve => mockAI.server.close(resolve));
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  const ingest = (chatId, messageId, text) => telegram.ingestUpdate({
+    update_id: messageId,
+    message: {
+      message_id: messageId,
+      date: now,
+      chat: { id: chatId, type: "private", username: "customer" + chatId },
+      from: { id: chatId, first_name: "客户" + chatId, username: "customer" + chatId },
+      text
+    }
+  });
+
+  const adminCookie = await login(base, "admin", "admin-pass-123");
+  const created = await apiRequest(base, "/api/users", {
+    method: "POST",
+    cookie: adminCookie,
+    body: {
+      username: "aiagent",
+      displayName: "客服一",
+      password: "agent-pass-1",
+      role: "agent",
+      aiAllowed: true
+    }
+  });
+  assert.equal(created.response.status, 201);
+  assert.equal(created.data.user.aiAllowed, true);
+  const agentId = created.data.user.id;
+  const agentCookie = await login(base, "aiagent", "agent-pass-1");
+
+  const aiSettings = await apiRequest(base, "/api/admin/ai", { cookie: adminCookie });
+  assert.equal(aiSettings.response.status, 200);
+  assert.equal(aiSettings.data.ai.configured, true);
+  assert.equal(aiSettings.data.ai.hasApiKey, true);
+  assert.equal(Object.prototype.hasOwnProperty.call(aiSettings.data.ai, "apiKey"), false);
+
+  const connection = await apiRequest(base, "/api/admin/ai/test", {
+    method: "POST",
+    cookie: adminCookie
+  });
+  assert.equal(connection.response.status, 200);
+  assert.equal(connection.data.test.reply, "OK");
+
+  const first = await ingest(9001, 1, "你好，我想咨询");
+  await new Promise(resolve => setTimeout(resolve, 30));
+  const conversationId = first.conversation.id;
+  const assigned = await apiRequest(base, `/api/conversations/${conversationId}`, {
+    method: "PATCH",
+    cookie: adminCookie,
+    body: { assigneeId: agentId }
+  });
+  assert.equal(assigned.response.status, 200);
+
+  const before = await apiRequest(base, "/api/ai/preferences", { cookie: agentCookie });
+  assert.equal(before.response.status, 200);
+  assert.equal(before.data.ai.configured, true);
+  assert.equal(before.data.ai.allowed, true);
+  assert.equal(before.data.ai.enabled, false);
+  assert.equal(before.data.ai.reason, "off");
+
+  const enabled = await apiRequest(base, "/api/ai/preferences", {
+    method: "PATCH",
+    cookie: agentCookie,
+    body: { enabled: true, mode: "auto" }
+  });
+  assert.equal(enabled.response.status, 200);
+  assert.equal(enabled.data.ai.enabled, true);
+  assert.equal(enabled.data.ai.mode, "auto");
+
+  await ingest(9001, 2, "我想申请退款");
+  await waitFor(() => mockTelegram.sent.length === 1);
+  assert.equal(String(mockTelegram.sent[0].chat_id), "9001");
+  assert.match(mockTelegram.sent[0].text, /退款/);
+
+  const thread = await apiRequest(base, `/api/conversations/${conversationId}/messages`, {
+    cookie: agentCookie
+  });
+  const inbound = thread.data.messages.find(message => message.direction === "in" && message.body === "我想申请退款");
+  assert.equal(inbound.aiStatus, "replied");
+  const outbound = thread.data.messages.find(message => message.direction === "out");
+  assert.equal(outbound.senderName, "客服一");
+  assert.equal(outbound.meta.via, "ai");
+  assert.equal(outbound.meta.ai, true);
+
+  const second = await ingest(9002, 3, "请问在吗");
+  await new Promise(resolve => setTimeout(resolve, 30));
+  const secondId = second.conversation.id;
+  await apiRequest(base, `/api/conversations/${secondId}`, {
+    method: "PATCH",
+    cookie: adminCookie,
+    body: { assigneeId: agentId }
+  });
+  const suggestMode = await apiRequest(base, "/api/ai/preferences", {
+    method: "PATCH",
+    cookie: agentCookie,
+    body: { enabled: true, mode: "suggest" }
+  });
+  assert.equal(suggestMode.response.status, 200);
+  const sentBeforeSuggestion = mockTelegram.sent.length;
+  await ingest(9002, 4, "退款需要多久");
+  await new Promise(resolve => setTimeout(resolve, 120));
+  assert.equal(mockTelegram.sent.length, sentBeforeSuggestion);
+  const suggestion = await apiRequest(base, `/api/conversations/${secondId}/ai-suggestion`, {
+    cookie: agentCookie
+  });
+  assert.equal(suggestion.response.status, 200);
+  assert.ok(suggestion.data.suggestion);
+  assert.match(suggestion.data.suggestion.body, /退款/);
+  const used = await apiRequest(
+    base,
+    `/api/conversations/${secondId}/ai-suggestion/${suggestion.data.suggestion.id}`,
+    { method: "PATCH", cookie: agentCookie, body: { status: "used" } }
+  );
+  assert.equal(used.response.status, 200);
+  const emptySuggestion = await apiRequest(base, `/api/conversations/${secondId}/ai-suggestion`, {
+    cookie: agentCookie
+  });
+  assert.equal(emptySuggestion.data.suggestion, null);
+
+  const third = await ingest(9003, 5, "第一次咨询");
+  await new Promise(resolve => setTimeout(resolve, 30));
+  const thirdId = third.conversation.id;
+  await apiRequest(base, `/api/conversations/${thirdId}`, {
+    method: "PATCH",
+    cookie: adminCookie,
+    body: { assigneeId: agentId }
+  });
+  await apiRequest(base, "/api/ai/preferences", {
+    method: "PATCH",
+    cookie: agentCookie,
+    body: { enabled: true, mode: "first" }
+  });
+  const sentBeforeFirst = mockTelegram.sent.length;
+  await ingest(9003, 6, "第一次咨询，请回复");
+  await waitFor(() => mockTelegram.sent.length === sentBeforeFirst + 1);
+  await ingest(9003, 7, "第二次咨询，不应自动回复");
+  await new Promise(resolve => setTimeout(resolve, 100));
+  assert.equal(mockTelegram.sent.length, sentBeforeFirst + 1);
+
+  const deniedUser = await apiRequest(base, "/api/users", {
+    method: "POST",
+    cookie: adminCookie,
+    body: {
+      username: "noai",
+      displayName: "无 AI 客服",
+      password: "agent-pass-2",
+      role: "agent"
+    }
+  });
+  assert.equal(deniedUser.response.status, 201);
+  assert.equal(deniedUser.data.user.aiAllowed, false);
+  const deniedCookie = await login(base, "noai", "agent-pass-2");
+  const denied = await apiRequest(base, "/api/ai/preferences", {
+    method: "PATCH",
+    cookie: deniedCookie,
+    body: { enabled: true, mode: "auto" }
+  });
+  assert.equal(denied.response.status, 403);
+
+  assert.equal(isAfterHours(
+    { workStart: "09:00", workEnd: "18:00", workTimezone: "Asia/Shanghai" },
+    new Date("2026-01-01T00:00:00Z")
+  ), true);
+  assert.equal(isAfterHours(
+    { workStart: "09:00", workEnd: "18:00", workTimezone: "Asia/Shanghai" },
+    new Date("2026-01-01T02:00:00Z")
+  ), false);
 });

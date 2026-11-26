@@ -12,6 +12,9 @@ CREATE TABLE IF NOT EXISTS users (
   password_hash TEXT NOT NULL,
   role TEXT NOT NULL DEFAULT 'agent' CHECK (role IN ('admin', 'agent', 'viewer')),
   active INTEGER NOT NULL DEFAULT 1,
+  ai_allowed INTEGER NOT NULL DEFAULT 0,
+  ai_enabled INTEGER NOT NULL DEFAULT 0,
+  ai_mode TEXT NOT NULL DEFAULT 'auto',
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
@@ -76,12 +79,30 @@ CREATE TABLE IF NOT EXISTS messages (
   translation_language TEXT,
   delivery_status TEXT,
   delivery_updated_at TEXT,
+  ai_status TEXT,
+  ai_error TEXT,
+  ai_reply_message_id INTEGER,
+  ai_updated_at TEXT,
   created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_messages_conversation ON messages(conversation_id, created_at);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_telegram
   ON messages(conversation_id, direction, telegram_message_id)
   WHERE telegram_message_id IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS ai_suggestions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  conversation_id INTEGER NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+  message_id INTEGER REFERENCES messages(id) ON DELETE SET NULL,
+  agent_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  body TEXT NOT NULL,
+  model TEXT,
+  status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'used', 'dismissed')),
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_ai_suggestions_conversation
+  ON ai_suggestions(conversation_id, status, created_at DESC);
 
 CREATE TABLE IF NOT EXISTS audit_logs (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -127,6 +148,14 @@ function openDatabase(dbPath) {
   ensureColumn(db, "messages", "translation_language", "TEXT");
   ensureColumn(db, "messages", "delivery_status", "TEXT");
   ensureColumn(db, "messages", "delivery_updated_at", "TEXT");
+  ensureColumn(db, "users", "ai_allowed", "INTEGER NOT NULL DEFAULT 0");
+  ensureColumn(db, "users", "ai_enabled", "INTEGER NOT NULL DEFAULT 0");
+  ensureColumn(db, "users", "ai_mode", "TEXT NOT NULL DEFAULT 'auto'");
+  ensureColumn(db, "messages", "ai_status", "TEXT");
+  ensureColumn(db, "messages", "ai_error", "TEXT");
+  ensureColumn(db, "messages", "ai_reply_message_id", "INTEGER");
+  ensureColumn(db, "messages", "ai_updated_at", "TEXT");
+  db.exec("UPDATE users SET ai_allowed = 1 WHERE role = 'admin'");
   db.exec(`
     UPDATE conversations
     SET assigned_at = COALESCE(last_message_at, created_at, updated_at)
@@ -153,14 +182,17 @@ function migrateUserRoles(db) {
         password_hash TEXT NOT NULL,
         role TEXT NOT NULL DEFAULT 'agent' CHECK (role IN ('admin', 'agent', 'viewer')),
         active INTEGER NOT NULL DEFAULT 1,
+        ai_allowed INTEGER NOT NULL DEFAULT 0,
+        ai_enabled INTEGER NOT NULL DEFAULT 0,
+        ai_mode TEXT NOT NULL DEFAULT 'auto',
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
       )
     `);
     db.exec(`
       INSERT INTO users_migrated
-        (id, username, display_name, password_hash, role, active, created_at, updated_at)
-      SELECT id, username, display_name, password_hash, role, active, created_at, updated_at
+        (id, username, display_name, password_hash, role, active, ai_allowed, ai_enabled, ai_mode, created_at, updated_at)
+      SELECT id, username, display_name, password_hash, role, active, 0, 0, 'auto', created_at, updated_at
       FROM users
     `);
     db.exec("DROP TABLE users;");
@@ -192,8 +224,8 @@ function bootstrapAdmin(db, config) {
   const now = nowIso();
 
   db.prepare(
-    `INSERT INTO users (username, display_name, password_hash, role, active, created_at, updated_at)
-     VALUES (?, ?, ?, 'admin', 1, ?, ?)`
+    `INSERT INTO users (username, display_name, password_hash, role, active, ai_allowed, created_at, updated_at)
+     VALUES (?, ?, ?, 'admin', 1, 1, ?, ?)`
   ).run(username, config.adminDisplayName || "管理员", hashPassword(password), now, now);
 
   return {

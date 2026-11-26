@@ -1,9 +1,17 @@
-const { toConversationSummary, toPublicMessage, toCannedReply } = require("./util");
+const {
+  toConversationSummary,
+  toPublicMessage,
+  toPublicAiSuggestion,
+  toCannedReply
+} = require("./util");
 
 const CONVERSATION_SELECT = `
   SELECT c.*,
          u.display_name AS assignee_display_name,
-         u.username AS assignee_username
+         u.username AS assignee_username,
+         u.ai_allowed AS assignee_ai_allowed,
+         u.ai_enabled AS assignee_ai_enabled,
+         u.ai_mode AS assignee_ai_mode
   FROM conversations c
   LEFT JOIN users u ON u.id = c.assignee_id
 `;
@@ -297,6 +305,27 @@ function getStats(db, days = 7, options = {}) {
   };
 }
 
+function getLatestAiSuggestion(db, conversationId) {
+  return toPublicAiSuggestion(
+    db.prepare(
+      `SELECT * FROM ai_suggestions
+       WHERE conversation_id = ? AND status = 'pending'
+       ORDER BY created_at DESC, id DESC
+       LIMIT 1`
+    ).get(conversationId)
+  );
+}
+
+function getAiSuggestionById(db, id) {
+  return db.prepare("SELECT * FROM ai_suggestions WHERE id = ?").get(id);
+}
+
+function updateAiSuggestionStatus(db, id, status) {
+  db.prepare(
+    "UPDATE ai_suggestions SET status = ?, updated_at = ? WHERE id = ?"
+  ).run(status, new Date().toISOString(), id);
+}
+
 function listCannedReplies(db) {
   const rows = db.prepare(
     `SELECT r.*, u.display_name AS created_by_name
@@ -332,6 +361,9 @@ module.exports = {
   listMessages,
   getMessageById,
   getConversationMessagesForExport,
+  getLatestAiSuggestion,
+  getAiSuggestionById,
+  updateAiSuggestionStatus,
   listCannedReplies,
   getCannedReplyById,
   getStats

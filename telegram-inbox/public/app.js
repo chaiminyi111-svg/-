@@ -10,6 +10,18 @@ const FALLBACK_LANGUAGES = [
 ];
 const LANGUAGE_LABELS = Object.fromEntries(FALLBACK_LANGUAGES);
 
+const AI_MODE_LABELS = {
+  off: "关闭",
+  suggest: "只生成建议",
+  auto: "自动回复",
+  first: "仅首次接待",
+  after_hours: "非工作时间"
+};
+
+function aiModeLabel(code) {
+  return AI_MODE_LABELS[code] || "自动回复";
+}
+
 function languageName(code) {
   if (!code) return "";
   const normalized = String(code).replace("_", "-");
@@ -39,7 +51,18 @@ const state = {
   translate: { configured: false, source: "none", languages: [], defaultTarget: "zh-CN" },
   replyLanguages: {},
   assignment: { enabled: false, strategy: "least_active", maxActive: 0 },
-  channels: { telegram: null, whatsapp: null, translate: null },
+  channels: { telegram: null, whatsapp: null, translate: null, ai: null },
+  ai: {
+    configured: false,
+    globalEnabled: false,
+    allowed: false,
+    enabled: false,
+    mode: "auto",
+    reason: "not_configured",
+    modes: []
+  },
+  aiPrefs: null,
+  aiSuggestion: null,
   telegramConfigured: false,
   whatsappConfigured: false,
   eventSource: null,
@@ -156,6 +179,7 @@ async function enterInbox() {
   showInbox();
   await loadUsers();
   await loadTranslateConfig();
+  await loadAiPreferences();
   await loadConversations();
   await loadSidebarStats();
   connectRealtime();
@@ -195,6 +219,7 @@ function showInbox() {
   $("#currentUser").textContent = `${state.me.displayName} · ${roleLabel(state.me.role)}`;
   $("#channelsBtn").hidden = state.me.role !== "admin";
   $("#teamBtn").hidden = state.me.role !== "admin";
+  $("#aiBtn").hidden = state.me.role === "viewer";
   applyRoleScope();
   renderTelegramState();
 }
@@ -216,6 +241,8 @@ function showLogin() {
   state.conversations = [];
   state.counts = {};
   state.filters = { scope: "all", status: "open", q: "" };
+  state.aiSuggestion = null;
+  state.aiPrefs = null;
   state.sending = false;
   state.uploading = false;
   document.body.classList.remove("mobile-chat-open");
@@ -240,6 +267,7 @@ function showLogin() {
   state.customerDirty = false;
   $("#chatPanel").hidden = true;
   $("#chatEmpty").hidden = false;
+  renderAiSuggestion();
   document.title = "聚合客服台 · Telegram 统一收件箱";
   setTimeout(() => $("#loginUsername")?.focus(), 50);
 }
@@ -247,6 +275,26 @@ function showLogin() {
 async function loadUsers() {
   const data = await api(`/api/users${state.me.role === "admin" ? "?includeInactive=1" : ""}`);
   state.users = data.users.filter(user => user.active);
+  if (state.active) renderChatHeader();
+}
+
+async function loadAiPreferences() {
+  if (!state.me || state.me.role === "viewer") return;
+  try {
+    const data = await api("/api/ai/preferences");
+    state.ai = data.ai || state.ai;
+    state.aiPrefs = data.ai || null;
+  } catch {
+    state.ai = {
+      configured: false,
+      globalEnabled: false,
+      allowed: false,
+      enabled: false,
+      mode: "auto",
+      reason: "not_configured",
+      modes: []
+    };
+  }
   if (state.active) renderChatHeader();
 }
 
@@ -458,6 +506,7 @@ async function selectConversation(id) {
     $("#chatEmpty").hidden = true;
     $("#chatPanel").hidden = false;
     renderChatHeader();
+    loadAiSuggestion(id);
     markRead(id);
     return;
   }
@@ -469,6 +518,8 @@ async function selectConversation(id) {
   state.hasMore = false;
   state.customerDirty = false;
   state.customerTags = [...(state.active?.tags || [])];
+  state.aiSuggestion = null;
+  renderAiSuggestion();
 
   document.body.classList.add("mobile-chat-open");
   $("#chatEmpty").hidden = true;
@@ -494,6 +545,7 @@ async function selectConversation(id) {
   }
 
   await loadMessages(id, token);
+  await loadAiSuggestion(id, token);
   markRead(id);
 }
 
@@ -772,6 +824,33 @@ function renderChatHeader() {
     language.textContent = "";
   }
 
+  const aiState = $("#chatAiState");
+  if (aiState) {
+    if (!conversation.assigneeId) {
+      aiState.hidden = true;
+      aiState.textContent = "";
+    } else {
+      let label = "AI 未配置";
+      let tone = "off";
+      if (state.ai?.configured && !state.ai.globalEnabled) {
+        label = "AI 总开关关闭";
+      } else if (state.ai?.configured && !conversation.assigneeAiAllowed) {
+        label = "AI 未授权";
+      } else if (state.ai?.configured && !conversation.assigneeAiEnabled) {
+        label = "AI 已关闭";
+      } else if (state.ai?.configured) {
+        label = `AI ${aiModeLabel(conversation.assigneeAiMode)}`;
+        tone = conversation.assigneeAiMode === "suggest" ? "suggest" : "on";
+      }
+      aiState.hidden = false;
+      aiState.className = "chat-ai-state " + tone;
+      aiState.textContent = label;
+      aiState.title = conversation.assigneeId === state.me?.id
+        ? "点击打开我的 AI 设置"
+        : "该会话负责客服的 AI 状态";
+    }
+  }
+
   const unread = Number(conversation.unreadCount || 0);
   const readState = $("#chatReadState");
   readState.hidden = false;
@@ -1024,9 +1103,39 @@ function handleRealtime(event) {
     return;
   }
 
+  if (event.type === "ai.preferences_updated") {
+    if (event.user?.id === state.me?.id) {
+      state.me = { ...state.me, ...event.user };
+      loadAiPreferences();
+      if (state.active) renderChatHeader();
+    }
+    return;
+  }
+
   if (event.conversation) {
     upsertConversation(event.conversation);
     if (state.activeId === event.conversation.id) state.active = event.conversation;
+  }
+
+  if (event.type === "ai.suggestion") {
+    if (state.activeId === event.conversation?.id) {
+      state.aiSuggestion = event.suggestion || null;
+      renderAiSuggestion();
+      showToast("AI 已生成回复建议", "success");
+    }
+    renderConversationList();
+    return;
+  }
+
+  if (event.type === "ai.error") {
+    if (state.activeId === event.conversation?.id) {
+      showToast(`AI 自动回复失败：${event.error || "请稍后重试"}`, "error");
+    }
+    return;
+  }
+
+  if (event.type === "ai.replied") {
+    return;
   }
 
   if (event.type === "message.created" || event.type === "message.updated") {
@@ -1838,13 +1947,15 @@ function renderChannelSettings() {
   renderTelegramSettings();
   renderWhatsAppSettings();
   renderTranslateSettings();
+  renderAiSettings();
 }
 
 async function loadChannelSettings() {
-  const [telegramResult, whatsappResult, translateResult] = await Promise.allSettled([
+  const [telegramResult, whatsappResult, translateResult, aiResult] = await Promise.allSettled([
     api("/api/admin/telegram"),
     api("/api/admin/whatsapp"),
-    api("/api/admin/translate")
+    api("/api/admin/translate"),
+    api("/api/admin/ai")
   ]);
 
   if (telegramResult.status === "fulfilled") {
@@ -1874,6 +1985,14 @@ async function loadChannelSettings() {
     $("#translateStatusText").textContent = "读取配置失败";
   }
 
+  if (aiResult.status === "fulfilled") {
+    state.channels.ai = aiResult.value.ai;
+  } else {
+    setChannelError("aiError", aiResult.reason.message);
+    $("#aiDot").className = "channel-dot off";
+    $("#aiStatusText").textContent = "读取配置失败";
+  }
+
   renderChannelSettings();
   renderTelegramState();
 }
@@ -1887,18 +2006,23 @@ async function openChannelsModal() {
   $("#whatsappVerifyInput").value = "";
   $("#whatsappSecretInput").value = "";
   $("#translateKeyInput").value = "";
+  $("#aiApiKey").value = "";
   $("#telegramClearBtn").hidden = true;
   $("#whatsappClearBtn").hidden = true;
   $("#translateClearBtn").hidden = true;
+  $("#aiClearBtn").hidden = true;
   $("#channelDot").className = "channel-dot";
   $("#whatsappDot").className = "channel-dot";
   $("#translateDot").className = "channel-dot";
+  $("#aiDot").className = "channel-dot";
   $("#channelStatusText").textContent = "正在检查配置…";
   $("#whatsappStatusText").textContent = "正在检查配置…";
   $("#translateStatusText").textContent = "正在检查配置…";
+  $("#aiStatusText").textContent = "正在检查配置…";
   setChannelError("channelError", "");
   setChannelError("whatsappError", "");
   setChannelError("translateError", "");
+  setChannelError("aiError", "");
   await loadChannelSettings();
 }
 
@@ -2074,6 +2198,258 @@ async function clearTranslateKey() {
   }
 }
 
+/* ---------- AI settings ---------- */
+const AI_PRESETS = {
+  openai: { baseUrl: "https://api.openai.com/v1", model: "gpt-4o-mini" },
+  deepseek: { baseUrl: "https://api.deepseek.com/v1", model: "deepseek-chat" },
+  qwen: { baseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1", model: "qwen-plus" },
+  zhipu: { baseUrl: "https://open.bigmodel.cn/api/paas/v4", model: "glm-4-flash" }
+};
+
+function renderAiSettings() {
+  const settings = state.channels.ai || {};
+  const configured = Boolean(settings.configured);
+  $("#aiDot").className = "channel-dot " + (configured && settings.enabled ? "on" : "off");
+  let text;
+  if (!configured) {
+    text = "未配置，填写 API Key、接口地址和模型后启用";
+  } else if (settings.enabled) {
+    text = `已启用 · ${settings.model || "模型未填写"}`;
+    if (settings.source === "environment") text += " · 来自环境变量";
+    else if (settings.source === "database") text += " · 已保存到服务器";
+  } else {
+    text = "已配置，但总开关关闭";
+  }
+  $("#aiStatusText").textContent = text;
+  $("#aiEnabled").checked = Boolean(settings.enabled);
+  $("#aiBaseUrl").value = settings.baseUrl || "https://api.openai.com/v1";
+  $("#aiModel").value = settings.model || "gpt-4o-mini";
+  $("#aiDefaultMode").value = settings.defaultMode || "suggest";
+  $("#aiSystemPrompt").value = settings.systemPrompt || "";
+  $("#aiWorkStart").value = settings.workStart || "09:00";
+  $("#aiWorkEnd").value = settings.workEnd || "18:00";
+  $("#aiWorkTimezone").value = settings.workTimezone || "Asia/Shanghai";
+  $("#aiIncludeGroups").checked = Boolean(settings.includeGroups);
+  $("#aiDelayMs").value = Number(settings.delayMs ?? 1500);
+  $("#aiApiKey").placeholder = settings.hasApiKey
+    ? (settings.source === "environment" ? "已配置（来自环境变量）" : "已配置，留空保持不变")
+    : "sk-...";
+  $("#aiClearBtn").hidden = !settings.hasApiKey || settings.source === "environment";
+  $("#aiTestBtn").disabled = !configured;
+}
+
+function applyAiPreset() {
+  const preset = AI_PRESETS[$("#aiPreset").value];
+  if (!preset) return;
+  $("#aiBaseUrl").value = preset.baseUrl;
+  $("#aiModel").value = preset.model;
+}
+
+async function saveAiSettings(event) {
+  event.preventDefault();
+  const button = $("#aiSaveBtn");
+  button.disabled = true;
+  button.textContent = "保存中…";
+  setChannelError("aiError", "");
+  try {
+    const data = await api("/api/admin/ai", {
+      method: "POST",
+      body: {
+        enabled: $("#aiEnabled").checked,
+        baseUrl: $("#aiBaseUrl").value.trim(),
+        apiKey: $("#aiApiKey").value.trim(),
+        model: $("#aiModel").value.trim(),
+        defaultMode: $("#aiDefaultMode").value,
+        systemPrompt: $("#aiSystemPrompt").value.trim(),
+        workStart: $("#aiWorkStart").value,
+        workEnd: $("#aiWorkEnd").value,
+        workTimezone: $("#aiWorkTimezone").value.trim(),
+        includeGroups: $("#aiIncludeGroups").checked,
+        delayMs: Number($("#aiDelayMs").value) || 0
+      }
+    });
+    state.channels.ai = data.ai;
+    $("#aiApiKey").value = "";
+    renderAiSettings();
+    await loadAiPreferences();
+    if (state.active) renderChatHeader();
+    showToast("AI 配置已保存", "success");
+  } catch (error) {
+    setChannelError("aiError", error.message);
+  } finally {
+    button.disabled = false;
+    button.textContent = "保存 AI 配置";
+  }
+}
+
+async function testAiConnection() {
+  const button = $("#aiTestBtn");
+  button.disabled = true;
+  button.textContent = "测试中…";
+  setChannelError("aiError", "");
+  try {
+    const data = await api("/api/admin/ai/test", { method: "POST" });
+    showToast(`AI 连接成功：${String(data.test?.reply || "OK").slice(0, 40)}`, "success");
+  } catch (error) {
+    setChannelError("aiError", error.message);
+  } finally {
+    button.disabled = false;
+    button.textContent = "测试连接";
+  }
+}
+
+async function clearAiKey() {
+  if (!window.confirm("确定清除 AI API Key？清除后会关闭 AI 总开关。")) return;
+  const button = $("#aiClearBtn");
+  button.disabled = true;
+  setChannelError("aiError", "");
+  try {
+    const data = await api("/api/admin/ai", { method: "DELETE" });
+    state.channels.ai = data.ai;
+    renderAiSettings();
+    await loadAiPreferences();
+    if (state.active) renderChatHeader();
+    showToast("AI API Key 已清除", "success");
+  } catch (error) {
+    setChannelError("aiError", error.message);
+  } finally {
+    button.disabled = false;
+  }
+}
+
+/* ---------- My AI preferences ---------- */
+async function loadAiUserPreferences() {
+  try {
+    const data = await api("/api/ai/preferences");
+    state.ai = data.ai || state.ai;
+    state.aiPrefs = data.ai || null;
+    renderAiUserPreferences();
+  } catch (error) {
+    setChannelError("aiPrefsError", error.message);
+  }
+}
+
+function renderAiUserPreferences() {
+  const data = state.aiPrefs || state.ai || {};
+  const usable = Boolean(data.configured && data.globalEnabled && data.allowed);
+  $("#aiUserDot").className = "channel-dot " + (usable && data.enabled ? "on" : "off");
+  let text;
+  if (!data.configured) text = "管理员尚未配置 AI 服务";
+  else if (!data.globalEnabled) text = "管理员已关闭 AI 总开关";
+  else if (!data.allowed) text = "管理员尚未给你开通 AI 权限";
+  else if (data.enabled) text = `已开启 · ${aiModeLabel(data.mode)}`;
+  else text = "已关闭，可在下方开启";
+  $("#aiUserStatusText").textContent = text;
+  $("#aiUserEnabled").checked = Boolean(data.enabled);
+  $("#aiUserEnabled").disabled = !usable;
+  $("#aiUserMode").disabled = !usable || !data.enabled;
+  $("#aiUserMode").value = data.mode || "auto";
+  $("#aiPrefsSave").disabled = !usable;
+  $("#openAiAdminBtn").hidden = state.me?.role !== "admin";
+  let hint = "保存后只影响分配给你的会话。";
+  if (!data.allowed) hint = "请联系管理员在「团队」中给你开通 AI 权限。";
+  else if (!data.configured) hint = "请联系管理员在「渠道 → AI 自动回复」中配置服务。";
+  else if (!data.globalEnabled) hint = "管理员已关闭 AI 总开关，暂时无法使用。";
+  $("#aiUserHint").textContent = hint;
+}
+
+async function openAiModal() {
+  if (!state.me || state.me.role === "viewer") return;
+  $("#aiModal").hidden = false;
+  setChannelError("aiPrefsError", "");
+  await loadAiUserPreferences();
+}
+
+async function saveAiUserPreferences(event) {
+  event.preventDefault();
+  const button = $("#aiPrefsSave");
+  button.disabled = true;
+  button.textContent = "保存中…";
+  setChannelError("aiPrefsError", "");
+  try {
+    const data = await api("/api/ai/preferences", {
+      method: "PATCH",
+      body: {
+        enabled: $("#aiUserEnabled").checked,
+        mode: $("#aiUserMode").value
+      }
+    });
+    state.ai = data.ai;
+    state.aiPrefs = data.ai;
+    renderAiUserPreferences();
+    await loadConversations({ silent: true });
+    if (state.active) renderChatHeader();
+    showToast("我的 AI 设置已保存", "success");
+  } catch (error) {
+    setChannelError("aiPrefsError", error.message);
+  } finally {
+    button.disabled = false;
+    button.textContent = "保存我的 AI 设置";
+  }
+}
+
+/* ---------- AI suggestion ---------- */
+async function loadAiSuggestion(conversationId, token = state.threadToken) {
+  try {
+    const data = await api(`/api/conversations/${conversationId}/ai-suggestion`);
+    if (state.activeId !== conversationId || token !== state.threadToken) return;
+    state.aiSuggestion = data.suggestion || null;
+    renderAiSuggestion();
+  } catch {
+    if (state.activeId === conversationId) {
+      state.aiSuggestion = null;
+      renderAiSuggestion();
+    }
+  }
+}
+
+function renderAiSuggestion() {
+  const panel = $("#aiSuggestion");
+  if (!panel) return;
+  const suggestion = state.aiSuggestion;
+  if (!suggestion || !state.active || suggestion.conversationId !== state.active.id) {
+    panel.hidden = true;
+    $("#aiSuggestionText").textContent = "";
+    $("#aiSuggestionMeta").textContent = "";
+    return;
+  }
+  panel.hidden = false;
+  $("#aiSuggestionText").textContent = suggestion.body;
+  $("#aiSuggestionMeta").textContent = suggestion.model
+    ? `${suggestion.model} · ${messageTime(suggestion.createdAt)}`
+    : messageTime(suggestion.createdAt);
+}
+
+async function updateAiSuggestion(status) {
+  if (!state.active || !state.aiSuggestion) return;
+  const suggestion = state.aiSuggestion;
+  try {
+    await api(`/api/conversations/${state.active.id}/ai-suggestion/${suggestion.id}`, {
+      method: "PATCH",
+      body: { status }
+    });
+    state.aiSuggestion = null;
+    renderAiSuggestion();
+  } catch (error) {
+    showToast(error.message, "error");
+  }
+}
+
+function useAiSuggestion() {
+  const suggestion = state.aiSuggestion;
+  if (!suggestion) return;
+  const input = $("#messageInput");
+  input.value = suggestion.body;
+  updateCharCount();
+  autoResize(input);
+  input.focus();
+  updateAiSuggestion("used");
+}
+
+function dismissAiSuggestion() {
+  updateAiSuggestion("dismissed");
+}
+
 /* ---------- Team ---------- */
 async function openTeamModal() {
   if (state.me.role !== "admin") return;
@@ -2158,6 +2534,18 @@ function renderTeamUsers() {
     const controls = document.createElement("div");
     controls.className = "team-controls";
 
+    const aiPermission = document.createElement("label");
+    aiPermission.className = "ai-permission";
+    aiPermission.title = "允许该员工使用 AI 助手";
+    const aiPermissionBox = document.createElement("input");
+    aiPermissionBox.type = "checkbox";
+    aiPermissionBox.checked = user.role === "admin" ? true : Boolean(user.aiAllowed);
+    aiPermissionBox.disabled = user.role === "admin" || !user.active;
+    aiPermissionBox.addEventListener("change", () => {
+      updateTeamUser(user.id, { aiAllowed: aiPermissionBox.checked });
+    });
+    aiPermission.append(aiPermissionBox, document.createTextNode("允许 AI"));
+
     const role = document.createElement("select");
     role.setAttribute("aria-label", "角色");
     role.innerHTML = '<option value="agent">客服</option><option value="viewer">统计员</option><option value="admin">管理员</option>';
@@ -2178,7 +2566,7 @@ function renderTeamUsers() {
     reset.textContent = "重置密码";
     reset.addEventListener("click", () => resetUserPassword(user));
 
-    controls.append(role, toggle, reset);
+    controls.append(aiPermission, role, toggle, reset);
     row.append(avatar, info, controls);
     list.appendChild(row);
   }
@@ -2204,9 +2592,10 @@ async function updateTeamUser(id, payload) {
       applyRoleScope();
     }
     showToast("成员已更新", "success");
-    await Promise.all([loadUsers(), loadTeamUsers()]);
+    await Promise.all([loadUsers(), loadTeamUsers(), loadAiPreferences()]);
     scheduleRefresh();
     if (state.active) renderChatHeader();
+    if (!$("#aiModal").hidden) renderAiUserPreferences();
   } catch (error) {
     showToast(error.message, "error");
     await loadTeamUsers();
@@ -2448,6 +2837,33 @@ function bindEvents() {
   $("#channelsModal").addEventListener("click", event => {
     if (event.target === $("#channelsModal")) $("#channelsModal").hidden = true;
   });
+  $("#aiForm").addEventListener("submit", saveAiSettings);
+  $("#aiPreset").addEventListener("change", applyAiPreset);
+  $("#aiTestBtn").addEventListener("click", testAiConnection);
+  $("#aiClearBtn").addEventListener("click", clearAiKey);
+
+  $("#aiBtn").addEventListener("click", openAiModal);
+  $("#aiClose").addEventListener("click", () => { $("#aiModal").hidden = true; });
+  $("#aiModal").addEventListener("click", event => {
+    if (event.target === $("#aiModal")) $("#aiModal").hidden = true;
+  });
+  $("#aiPrefsForm").addEventListener("submit", saveAiUserPreferences);
+  $("#aiUserEnabled").addEventListener("change", () => {
+    const data = state.aiPrefs || state.ai || {};
+    const usable = Boolean(data.configured && data.globalEnabled && data.allowed);
+    $("#aiUserMode").disabled = !usable || !$("#aiUserEnabled").checked;
+  });
+  $("#openAiAdminBtn").addEventListener("click", async () => {
+    $("#aiModal").hidden = true;
+    await openChannelsModal();
+    $("#aiStatus")?.scrollIntoView({ behavior: "smooth", block: "start" });
+  });
+  $("#aiUseSuggestion").addEventListener("click", useAiSuggestion);
+  $("#aiDismissSuggestion").addEventListener("click", dismissAiSuggestion);
+  $("#chatAiState").addEventListener("click", () => {
+    if (state.active?.assigneeId === state.me?.id) openAiModal();
+  });
+
   $("#telegramForm").addEventListener("submit", saveTelegramToken);
   $("#telegramClearBtn").addEventListener("click", clearTelegramToken);
   $("#whatsappForm").addEventListener("submit", saveWhatsAppCredentials);
@@ -2477,7 +2893,8 @@ function bindEvents() {
           username: $("#newUsername").value,
           displayName: $("#newDisplayName").value,
           password: $("#newPassword").value,
-          role: $("#newRole").value
+          role: $("#newRole").value,
+          aiAllowed: $("#newAiAllowed").checked
         }
       });
       event.target.reset();
@@ -2535,6 +2952,7 @@ function bindEvents() {
     if (event.key === "Escape") {
       $("#channelsModal").hidden = true;
       $("#teamModal").hidden = true;
+      $("#aiModal").hidden = true;
       $("#passwordModal").hidden = true;
       $("#cannedModal").hidden = true;
       $("#statsModal").hidden = true;

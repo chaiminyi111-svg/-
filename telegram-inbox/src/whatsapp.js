@@ -172,7 +172,7 @@ function extractWhatsAppContent(message) {
   return { type: "unknown", body: "[WhatsApp 消息]", meta: { via: "whatsapp" } };
 }
 
-function createWhatsAppService({ db, config, logger, broadcaster, translate }) {
+function createWhatsAppService({ db, config, logger, broadcaster, translate, hooks = {} }) {
   const readStored = key => getSetting(db, "whatsapp_" + key, null);
   const storedKeys = ["token", "phone_number_id", "verify_token", "app_secret"];
   const hasStored = storedKeys.some(key => readStored(key) !== null);
@@ -364,6 +364,15 @@ function createWhatsAppService({ db, config, logger, broadcaster, translate }) {
 
     if (result.created) emit({ type: "conversation.created", conversation });
     emit({ type: "message.created", conversation, message: publicMessage });
+    try {
+      await hooks?.onInbound?.({
+        conversation,
+        message: publicMessage,
+        isEdited: false
+      });
+    } catch (error) {
+      logger?.warn("WhatsApp 入站后置处理失败", error.message);
+    }
     return { ...result, conversation, message: publicMessage };
   }
 
@@ -458,7 +467,7 @@ function createWhatsAppService({ db, config, logger, broadcaster, translate }) {
         user.id,
         user.displayName,
         outboundText,
-        JSON.stringify({ via: "whatsapp", ...prepared.meta }),
+        JSON.stringify({ via: options.via || "whatsapp", ...(options.meta || {}), ...prepared.meta }),
         prepared.language || null,
         now,
         createdAt

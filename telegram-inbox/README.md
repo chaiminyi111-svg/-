@@ -10,6 +10,7 @@
 - WhatsApp Cloud API webhook 收消息，支持文本回复；出站消息展示已发送/已送达/已读回执
 - 统一收件箱：私聊、群聊、未读计数、已读/未读状态、手动标记未读、消息预览、渠道标识
 - 翻译服务：自动识别客户语言，外文消息自动翻译为中文；回复时可选择「跟随客户语言」或指定其他语言。支持官方 Cloud Translation API，以及 4 个无需 Key 的备用通道：Google 网页翻译（`translate.googleapis.com` / `translate.google.com`）、Google Chrome 翻译接口、MyMemory，可在「渠道」中随时切换
+- AI 自动回复：管理员在「渠道」接入任意 OpenAI 兼容接口（OpenAI、DeepSeek、通义千问、智谱等），可设置模型、系统提示词、工作时间和默认模式；支持「只生成建议 / 自动回复 / 仅首次接待 / 非工作时间」四种模式。管理员在「团队」中按员工授权，员工可在「AI 助手」中单独开关并选择模式
 - 客服分配：管理员可分配给任意客服；支持自动分配（当前接待最少/轮询）和每人接待上限
 - 会话可见范围：管理员可查看全部；普通客服只能查看自己名下和未分配的会话，不能查看其他客服的会话
 - 会话状态：待处理、跟进中、已关闭
@@ -20,7 +21,7 @@
 - 入站媒体（Telegram）：图片、文件、语音、音频、视频、贴纸展示与下载代理
 - 统计看板：最近 7/14/30 天会话、消息趋势、客服工作量、平均首响、平均解决时长、SLA 超时，支持导出 CSV
 - 团队管理：管理员创建客服、调整角色、停用/启用、重置密码
-- 渠道设置：管理员可在网页顶栏「渠道」中配置 Telegram、WhatsApp 和 Google 翻译凭据，保存前自动验证，立即生效，无需改 `.env` 或重启
+- 渠道设置：管理员可在网页顶栏「渠道」中配置 Telegram、WhatsApp、Google 翻译和 AI 服务，保存后立即生效，无需改 `.env` 或重启
 - 实时更新：SSE 推送新消息和会话变更，断线自动降级轮询
 - 本地账号体系：scrypt 密码哈希、HttpOnly 会话 Cookie、登录限流
 - 安全基线：CSRF 同源校验、CSP、参数化 SQL、审计日志
@@ -51,6 +52,7 @@ telegram-inbox/
 │   ├── telegram.js        # Telegram Bot 长轮询、收发消息、媒体
 │   ├── whatsapp.js        # WhatsApp Cloud API webhook、文本收发
 │   ├── translate.js       # Google Cloud Translation 识别与翻译
+│   ├── ai.js              # OpenAI 兼容 AI 自动回复、建议与模式
 │   ├── assignment.js      # 新会话自动分配
 │   └── util.js
 ├── scripts/
@@ -170,6 +172,22 @@ TELEGRAM_DELETE_WEBHOOK=true
 
 > Telegram Bot API 的限制：机器人不能主动给从未和它对话过的用户发私信。客服只能在用户先发起会话后回复。这是平台规则，不建议用非官方手段绕过。
 
+## 配置 AI 自动回复
+
+1. 管理员打开顶栏「渠道」，滚动到「AI 自动回复」，选择服务商预设或填写任意 OpenAI 兼容接口地址、API Key 和模型，保存后点「测试连接」。
+2. 打开「团队」，在员工行勾选「允许 AI」，给需要使用的客服授权。
+3. 员工登录后点顶栏「AI 助手」，打开自己的 AI 开关并选择回复模式。
+
+模式说明：
+
+- **只生成建议**：AI 生成草稿，显示在聊天窗口下方，客服点「填入输入框」后自行发送。
+- **自动回复**：每条新客户消息自动回复。
+- **仅首次接待**：只在会话还没有任何出站回复时自动回复一次。
+- **非工作时间**：只在设置的工作时间之外自动回复，时区默认 `Asia/Shanghai`。
+- **关闭**：不生成建议，也不自动回复。
+
+AI 只处理已分配给客服的私聊会话；群聊需要在「渠道」中单独勾选。API Key 只保存在服务器 SQLite 数据库，页面不会回显；AI 回复会以负责客服的身份发送，并在消息元数据中标记 `via: ai`。
+
 ## Docker 部署
 
 ```bash
@@ -239,6 +257,18 @@ TRUST_PROXY=true
 | `MYMEMORY_API_BASE` | `https://api.mymemory.translated.net` | MyMemory 免费翻译接口地址 |
 | `TRANSLATE_TARGET` | `zh-CN` | 入站外文消息默认翻译目标语言 |
 | `TRANSLATE_TIMEOUT_MS` | `10000` | 翻译请求超时毫秒数 |
+| `AI_ENABLED` | `false` | 是否启用 AI 自动回复总开关；也可在「渠道」页面设置 |
+| `AI_API_KEY` / `OPENAI_API_KEY` | 空 | OpenAI 兼容接口 Key；也可在「渠道」页面保存 |
+| `AI_BASE_URL` / `OPENAI_BASE_URL` | `https://api.openai.com/v1` | OpenAI 兼容接口地址 |
+| `AI_MODEL` / `OPENAI_MODEL` | `gpt-4o-mini` | 模型名称 |
+| `AI_DEFAULT_MODE` | `auto` | `suggest` / `auto` / `first` / `after_hours` / `off` |
+| `AI_WORK_START` | `09:00` | 非工作时间模式的上班时间 |
+| `AI_WORK_END` | `18:00` | 非工作时间模式的下班时间 |
+| `AI_WORK_TIMEZONE` | `Asia/Shanghai` | 工作时间使用的时区 |
+| `AI_INCLUDE_GROUPS` | `false` | 群聊是否也自动回复 |
+| `AI_DELAY_MS` | `1500` | 收到消息后等待多久再生成回复，用于合并连续消息 |
+| `AI_TIMEOUT_MS` | `30000` | AI 接口请求超时毫秒数 |
+| `AI_MAX_CONTEXT` | `12` | 发送给 AI 的最近消息条数 |
 | `AUTO_ASSIGN` | `false` | 是否自动分配新会话；也可在「团队」页面开启 |
 | `AUTO_ASSIGN_STRATEGY` | `least_active` | `least_active`（当前接待最少）/ `round_robin`（轮询） |
 | `AGENT_MAX_ACTIVE` | `0` | 每位客服同时接待上限，0 表示不限制 |
@@ -306,7 +336,7 @@ sqlite3 data/inbox.db ".backup 'data/inbox-backup.db'"
 npm test
 ```
 
-测试会启动 mock Telegram API、mock WhatsApp API 和 mock Google 翻译 API，覆盖登录、收消息、分配权限、客服会话可见范围、SSE 推送过滤、文本回复、出站图片/文件、媒体代理、WhatsApp webhook 验签与回复、管理员渠道凭据保存/清除、Google 翻译识别与出站翻译、多免费翻译通道切换、已读/未读与 WhatsApp 回执、自动分配与接待上限、SLA 统计、CSV 导出、快捷回复、客户标签/备注、搜索、CSRF、角色校验和最后管理员保护，不需要真实平台凭据。
+测试会启动 mock Telegram API、mock WhatsApp API、mock Google 翻译 API 和 mock OpenAI 兼容接口，覆盖登录、收消息、分配权限、客服会话可见范围、SSE 推送过滤、文本回复、出站图片/文件、媒体代理、WhatsApp webhook 验签与回复、管理员渠道凭据保存/清除、Google 翻译识别与出站翻译、多免费翻译通道切换、AI 权限与自动回复/建议/仅首次模式、已读/未读与 WhatsApp 回执、自动分配与接待上限、SLA 统计、CSV 导出、快捷回复、客户标签/备注、搜索、CSRF、角色校验和最后管理员保护，不需要真实平台凭据。
 
 ## 后续路线
 

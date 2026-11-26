@@ -49,6 +49,7 @@
         <span id="connectionStatus" class="connection"><i></i><span>连接中</span></span>
         <span id="currentUser" class="current-user"></span>
         <button id="statsBtn" class="ghost" type="button">数据</button>
+        <button id="aiBtn" class="ghost" type="button" hidden>AI 助手</button>
         <button id="channelsBtn" class="ghost" type="button" hidden>渠道</button>
         <button id="teamBtn" class="ghost" type="button" hidden>团队</button>
         <button id="passwordBtn" class="ghost" type="button">修改密码</button>
@@ -125,6 +126,7 @@
                 <p id="chatSubtitle"></p>
                 <div class="chat-badges">
                   <span id="chatLanguage" class="chat-language" hidden></span>
+                  <span id="chatAiState" class="chat-ai-state" hidden></span>
                   <span id="chatReadState" class="chat-read-state" hidden></span>
                 </div>
               </div>
@@ -185,6 +187,18 @@
           </div>
 
           <div id="messageList" class="message-list" aria-live="polite"></div>
+
+          <div id="aiSuggestion" class="ai-suggestion" hidden>
+            <div class="ai-suggestion-head">
+              <strong>AI 回复建议</strong>
+              <span id="aiSuggestionMeta"></span>
+            </div>
+            <p id="aiSuggestionText"></p>
+            <div class="ai-suggestion-actions">
+              <button id="aiUseSuggestion" class="primary" type="button">填入输入框</button>
+              <button id="aiDismissSuggestion" class="ghost" type="button">忽略</button>
+            </div>
+          </div>
 
           <form id="composer" class="composer">
             <textarea id="messageInput" rows="1" maxlength="4096" placeholder="输入回复，Enter 发送，Shift + Enter 换行" autocomplete="off"></textarea>
@@ -315,6 +329,10 @@
               <option value="viewer">统计员（只读）</option>
               <option value="admin">管理员</option>
             </select>
+          </label>
+          <label class="checkline ai-create-check">
+            <input id="newAiAllowed" type="checkbox">
+            允许使用 AI 助手
           </label>
           <button class="primary" type="submit">创建账号</button>
           <div id="createUserError" class="form-error" hidden></div>
@@ -598,6 +616,147 @@
         <strong>怎么获取 Key？</strong>
         <p>在 Google Cloud Console 启用 Cloud Translation API，创建 API Key 后填入这里。Key 仅用于服务端调用，不会发送到浏览器。没有 Key 时可在上方切换任意一个免费备用通道。</p>
       </div>
+
+      <div class="channel-divider"></div>
+
+      <div class="channel-status" id="aiStatus">
+        <span class="channel-dot" id="aiDot" aria-hidden="true"></span>
+        <div>
+          <strong>AI 自动回复</strong>
+          <span id="aiStatusText">正在检查配置…</span>
+        </div>
+      </div>
+
+      <form id="aiForm" class="channel-form">
+        <label class="checkline">
+          <input id="aiEnabled" type="checkbox">
+          启用 AI 自动回复（总开关）
+        </label>
+
+        <label>
+          服务商预设
+          <select id="aiPreset">
+            <option value="custom">自定义 OpenAI 兼容接口</option>
+            <option value="openai">OpenAI</option>
+            <option value="deepseek">DeepSeek</option>
+            <option value="qwen">通义千问（DashScope 兼容模式）</option>
+            <option value="zhipu">智谱 GLM</option>
+          </select>
+        </label>
+
+        <label>
+          API 地址
+          <input id="aiBaseUrl" type="url" spellcheck="false" maxlength="300" placeholder="https://api.openai.com/v1">
+        </label>
+
+        <label id="aiKeyLabel">
+          API Key
+          <input id="aiApiKey" type="password" autocomplete="off" spellcheck="false" maxlength="500" placeholder="sk-...">
+        </label>
+
+        <label>
+          模型
+          <input id="aiModel" type="text" spellcheck="false" maxlength="100" placeholder="gpt-4o-mini">
+        </label>
+
+        <label>
+          默认回复模式
+          <select id="aiDefaultMode">
+            <option value="suggest">只生成建议</option>
+            <option value="auto">自动回复</option>
+            <option value="first">仅首次接待</option>
+            <option value="after_hours">非工作时间</option>
+            <option value="off">关闭</option>
+          </select>
+        </label>
+
+        <label>
+          系统提示词
+          <textarea id="aiSystemPrompt" rows="5" maxlength="4000" placeholder="定义 AI 的身份、语气和业务边界"></textarea>
+        </label>
+
+        <div class="ai-form-grid">
+          <label>
+            工作时间开始
+            <input id="aiWorkStart" type="time" value="09:00">
+          </label>
+          <label>
+            工作时间结束
+            <input id="aiWorkEnd" type="time" value="18:00">
+          </label>
+          <label>
+            时区
+            <input id="aiWorkTimezone" type="text" maxlength="60" value="Asia/Shanghai">
+          </label>
+        </div>
+
+        <label>
+          回复延迟（毫秒）
+          <input id="aiDelayMs" type="number" min="0" max="60000" step="100" value="1500">
+        </label>
+
+        <label class="checkline">
+          <input id="aiIncludeGroups" type="checkbox">
+          群聊也启用 AI 自动回复
+        </label>
+
+        <p class="channel-note">支持 OpenAI、DeepSeek、通义千问、智谱等 OpenAI 兼容接口。Key 只保存在服务器数据库，不会回显到页面。AI 只处理已分配给客服的会话，并受员工权限和员工自己的 AI 开关控制。</p>
+
+        <div class="channel-actions">
+          <button class="primary" type="submit" id="aiSaveBtn">保存 AI 配置</button>
+          <button class="ghost" type="button" id="aiTestBtn">测试连接</button>
+          <button class="ghost" type="button" id="aiClearBtn" hidden>清除 Key</button>
+        </div>
+        <div id="aiError" class="form-error" hidden></div>
+      </form>
+
+      <div class="channel-help">
+        <strong>回复模式说明</strong>
+        <p><b>只生成建议</b>：AI 生成草稿，客服确认后发送。<b>自动回复</b>：每条新客户消息自动回复。<b>仅首次接待</b>：只在还没有人工回复时自动回复一次。<b>非工作时间</b>：只在设置的工作时间之外自动回复。</p>
+      </div>
+    </div>
+  </div>
+
+  <div id="aiModal" class="modal" hidden>
+    <div class="modal-card ai-card" role="dialog" aria-modal="true" aria-labelledby="aiTitle">
+      <header class="modal-head">
+        <div>
+          <h3 id="aiTitle">我的 AI 助手</h3>
+          <p>AI 只处理分配给你的会话；你可以单独开关和选择回复模式。</p>
+        </div>
+        <button id="aiClose" class="modal-close" type="button" aria-label="关闭">×</button>
+      </header>
+
+      <div class="channel-status" id="aiUserStatus">
+        <span class="channel-dot" id="aiUserDot" aria-hidden="true"></span>
+        <div>
+          <strong>AI 权限与状态</strong>
+          <span id="aiUserStatusText">正在检查…</span>
+        </div>
+      </div>
+
+      <form id="aiPrefsForm" class="channel-form">
+        <label class="checkline">
+          <input id="aiUserEnabled" type="checkbox">
+          启用我的 AI 自动回复
+        </label>
+        <label>
+          我的回复模式
+          <select id="aiUserMode">
+            <option value="suggest">只生成建议</option>
+            <option value="auto">自动回复</option>
+            <option value="first">仅首次接待</option>
+            <option value="after_hours">非工作时间</option>
+            <option value="off">关闭</option>
+          </select>
+        </label>
+        <p class="channel-note" id="aiUserHint">保存后只影响分配给你的会话。</p>
+        <div class="channel-actions">
+          <button class="primary" type="submit" id="aiPrefsSave">保存我的 AI 设置</button>
+          <button class="ghost" type="button" id="openAiAdminBtn" hidden>管理员 AI 配置</button>
+        </div>
+        <div id="aiPrefsError" class="form-error" hidden></div>
+      </form>
     </div>
   </div>
 

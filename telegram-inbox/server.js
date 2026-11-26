@@ -5,6 +5,7 @@ const { createBroadcaster } = require("./src/realtime");
 const { createTelegramService } = require("./src/telegram");
 const { createWhatsAppService } = require("./src/whatsapp");
 const { createTranslateService } = require("./src/translate");
+const { createAIService } = require("./src/ai");
 const { createApp } = require("./src/app");
 
 const logger = createLogger(config.logLevel);
@@ -25,9 +26,21 @@ async function main() {
 
   const broadcaster = createBroadcaster(logger);
   const translate = createTranslateService({ db, config, logger });
-  const telegram = createTelegramService({ db, config, logger, broadcaster, translate });
-  const whatsapp = createWhatsAppService({ db, config, logger, broadcaster, translate });
-  const app = createApp({ db, config, telegram, whatsapp, broadcaster, logger, translate });
+  const hooks = {};
+  const telegram = createTelegramService({ db, config, logger, broadcaster, translate, hooks });
+  const whatsapp = createWhatsAppService({ db, config, logger, broadcaster, translate, hooks });
+  const ai = createAIService({
+    db,
+    config,
+    logger,
+    broadcaster,
+    sendReply: (conversation, text, user, options) => {
+      const service = (conversation.channel || "telegram") === "whatsapp" ? whatsapp : telegram;
+      return service.sendReply(conversation, text, user, options);
+    }
+  });
+  hooks.onInbound = event => ai.handleInbound(event);
+  const app = createApp({ db, config, telegram, whatsapp, broadcaster, logger, translate, ai });
 
   const server = app.listen(config.port, config.host, () => {
     logger.info(`Telegram 客服收件箱已启动：http://${config.host}:${config.port}`);
@@ -35,12 +48,15 @@ async function main() {
     logger.info(`Telegram Bot：${telegram.configured ? "已配置" : "未配置（只能查看已有数据）"}`);
     logger.info(`WhatsApp Cloud API：${whatsapp.configured ? "已配置" : "未配置"}`);
     logger.info(`Google 翻译：${translate.configured() ? "已配置" : "未配置"}`);
+    logger.info(`AI 自动回复：${ai.configured() ? (ai.status().enabled ? "已启用" : "已配置，总开关关闭") : "未配置"}`);
   });
 
   server.on("error", error => {
     logger.error("HTTP 服务启动失败", error.message);
     process.exitCode = 1;
   });
+
+  ai.resumeQueued();
 
   telegram.start().catch(error => {
     logger.error("Telegram 轮询启动失败", error.message);
@@ -51,6 +67,7 @@ async function main() {
     if (shuttingDown) return;
     shuttingDown = true;
     logger.info(`收到 ${signal}，正在关闭服务…`);
+    ai.close();
     broadcaster.close();
     await telegram.stop();
     server.close(() => {

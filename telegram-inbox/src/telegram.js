@@ -305,7 +305,7 @@ function extractContent(message) {
   return { type: "unknown", body: "[暂不支持的消息类型]", meta: {} };
 }
 
-function createTelegramService({ db, config, logger, broadcaster, translate }) {
+function createTelegramService({ db, config, logger, broadcaster, translate, hooks = {} }) {
   const storedToken = getSetting(db, "telegram_bot_token", null);
   const initialToken = storedToken !== null ? storedToken : config.telegramToken;
   const client = new TelegramClient({
@@ -482,6 +482,15 @@ function createTelegramService({ db, config, logger, broadcaster, translate }) {
       });
     }
     emit(payload);
+    try {
+      await hooks?.onInbound?.({
+        conversation: payload.conversation,
+        message: payload.message,
+        isEdited: result.isEdited
+      });
+    } catch (error) {
+      logger?.warn("Telegram 入站后置处理失败", error.message);
+    }
     return { ...result, conversation: payload.conversation, message: payload.message };
   }
 
@@ -512,7 +521,7 @@ function createTelegramService({ db, config, logger, broadcaster, translate }) {
         user.id,
         user.displayName,
         outboundText,
-        JSON.stringify({ via: "bot", ...prepared.meta }),
+        JSON.stringify({ via: options.via || "bot", ...(options.meta || {}), ...prepared.meta }),
         prepared.language || null,
         createdAt
       );

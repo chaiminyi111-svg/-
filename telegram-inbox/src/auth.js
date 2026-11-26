@@ -110,7 +110,8 @@ function attachUser(db) {
     const tokenHash = sha256(token);
     const row = db.prepare(
       `SELECT s.token_hash, s.expires_at,
-              u.id, u.username, u.display_name, u.role, u.active, u.created_at
+              u.id, u.username, u.display_name, u.role, u.active,
+              u.ai_allowed, u.ai_enabled, u.ai_mode, u.created_at
        FROM sessions s
        JOIN users u ON u.id = s.user_id
        WHERE s.token_hash = ?`

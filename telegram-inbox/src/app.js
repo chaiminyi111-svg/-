@@ -24,7 +24,10 @@ const {
   getMessageById,
   listCannedReplies,
   getCannedReplyById,
-  getStats
+  getStats,
+  getLatestAiSuggestion,
+  getAiSuggestionById,
+  updateAiSuggestionStatus
 } = require("./store");
 const { nowIso, toPublicUser, toConversationSummary, toCannedReply } = require("./util");
 const { readSettings, saveSettings } = require("./assignment");
@@ -40,7 +43,7 @@ function parseId(value) {
   return Number.isFinite(id) && id > 0 ? id : null;
 }
 
-function createApp({ db, config, telegram, whatsapp, broadcaster, logger, translate }) {
+function createApp({ db, config, telegram, whatsapp, broadcaster, logger, translate, ai }) {
   const app = express();
   app.disable("x-powered-by");
   app.set("trust proxy", config.trustProxy ? 1 : false);
@@ -59,7 +62,9 @@ function createApp({ db, config, telegram, whatsapp, broadcaster, logger, transl
 
   function getUserById(id) {
     return db.prepare(
-      "SELECT id, username, display_name, role, active, created_at FROM users WHERE id = ?"
+      `SELECT id, username, display_name, role, active,
+              ai_allowed, ai_enabled, ai_mode, created_at
+       FROM users WHERE id = ?`
     ).get(id);
   }
 
@@ -143,6 +148,8 @@ function createApp({ db, config, telegram, whatsapp, broadcaster, logger, transl
       telegramConfigured: Boolean(telegram?.configured),
       whatsappConfigured: Boolean(whatsapp?.configured),
       translationConfigured: Boolean(translate?.configured?.()),
+      aiConfigured: Boolean(ai?.configured?.()),
+      aiEnabled: Boolean(ai?.status?.().enabled),
       now: nowIso()
     });
   });
@@ -233,7 +240,8 @@ function createApp({ db, config, telegram, whatsapp, broadcaster, logger, transl
   app.get("/api/users", requireAuth, (req, res) => {
     const includeInactive = req.user.role === "admin" && req.query.includeInactive === "1";
     const rows = db.prepare(
-      `SELECT id, username, display_name, role, active, created_at
+      `SELECT id, username, display_name, role, active,
+              ai_allowed, ai_enabled, ai_mode, created_at
        FROM users
        ${includeInactive ? "" : "WHERE active = 1"}
        ORDER BY active DESC, role DESC, display_name ASC`
@@ -246,6 +254,8 @@ function createApp({ db, config, telegram, whatsapp, broadcaster, logger, transl
     const displayName = String(req.body?.displayName || "").trim();
     const password = String(req.body?.password || "");
     const role = String(req.body?.role || "agent");
+    const aiAllowed = [true, 1, "1", "true"].includes(req.body?.aiAllowed);
+    const effectiveAiAllowed = role === "admin" ? true : role === "viewer" ? false : aiAllowed;
 
     if (!/^[A-Za-z0-9_.-]{3,32}$/.test(username)) {
       return jsonError(res, 400, "用户名需为 3-32 位字母、数字、下划线、点或短横线");
@@ -259,11 +269,12 @@ function createApp({ db, config, telegram, whatsapp, broadcaster, logger, transl
     const now = nowIso();
     try {
       const result = db.prepare(
-        `INSERT INTO users (username, display_name, password_hash, role, active, created_at, updated_at)
-         VALUES (?, ?, ?, ?, 1, ?, ?)`
-      ).run(username, displayName, hashPassword(password), role, now, now);
+        `INSERT INTO users
+           (username, display_name, password_hash, role, active, ai_allowed, ai_enabled, ai_mode, created_at, updated_at)
+         VALUES (?, ?, ?, ?, 1, ?, 0, 'auto', ?, ?)`
+      ).run(username, displayName, hashPassword(password), role, effectiveAiAllowed ? 1 : 0, now, now);
       const user = getUserById(Number(result.lastInsertRowid));
-      audit(db, req.user.id, "user.created", "user", user.id, JSON.stringify({ username, role }));
+      audit(db, req.user.id, "user.created", "user", user.id, JSON.stringify({ username, role, aiAllowed: effectiveAiAllowed }));
       res.status(201).json({ user: toPublicUser(user) });
     } catch (error) {
       if (String(error.message).includes("UNIQUE")) {
@@ -285,6 +296,13 @@ function createApp({ db, config, telegram, whatsapp, broadcaster, logger, transl
     const nextActive = req.body?.active !== undefined
       ? [true, 1, "1", "true"].includes(req.body.active)
       : Boolean(target.active);
+    const requestedAiAllowed = req.body?.aiAllowed !== undefined
+      ? [true, 1, "1", "true"].includes(req.body.aiAllowed)
+      : Boolean(target.ai_allowed);
+    const nextAiAllowed = nextRole === "admin" ? true : nextRole === "viewer" ? false : requestedAiAllowed;
+    const nextAiEnabled = nextAiAllowed && nextActive && nextRole !== "viewer"
+      ? Boolean(target.ai_enabled)
+      : false;
 
     if (!nextDisplayName || nextDisplayName.length > 40) {
       return jsonError(res, 400, "显示名称需为 1-40 个字符");
@@ -303,9 +321,17 @@ function createApp({ db, config, telegram, whatsapp, broadcaster, logger, transl
 
     db.prepare(
       `UPDATE users
-       SET display_name = ?, role = ?, active = ?, updated_at = ?
+       SET display_name = ?, role = ?, active = ?, ai_allowed = ?, ai_enabled = ?, updated_at = ?
        WHERE id = ?`
-    ).run(nextDisplayName, nextRole, nextActive ? 1 : 0, nowIso(), id);
+    ).run(
+      nextDisplayName,
+      nextRole,
+      nextActive ? 1 : 0,
+      nextAiAllowed ? 1 : 0,
+      nextAiEnabled ? 1 : 0,
+      nowIso(),
+      id
+    );
 
     if (!nextActive || nextRole === "viewer") {
       if (!nextActive) destroyUserSessions(db, id);
@@ -316,7 +342,8 @@ function createApp({ db, config, telegram, whatsapp, broadcaster, logger, transl
     audit(db, req.user.id, "user.updated", "user", id, JSON.stringify({
       displayName: nextDisplayName,
       role: nextRole,
-      active: nextActive
+      active: nextActive,
+      aiAllowed: nextAiAllowed
     }));
     res.json({ user: toPublicUser(getUserById(id)) });
   });
@@ -389,6 +416,79 @@ function createApp({ db, config, telegram, whatsapp, broadcaster, logger, transl
     translate?.clearApiKey?.();
     audit(db, req.user.id, "translate.credentials_cleared", "channel", "google_translate");
     res.json({ translate: translate?.status?.() || { configured: false, source: "none", provider: "google", languages: [] } });
+  });
+
+  app.get("/api/admin/ai", requireAdmin, (req, res) => {
+    if (!ai) return jsonError(res, 503, "AI 服务不可用");
+    res.json({ ai: ai.status() });
+  });
+
+  app.post("/api/admin/ai", requireAdmin, (req, res) => {
+    if (!ai) return jsonError(res, 503, "AI 服务不可用");
+    try {
+      const settings = ai.saveSettings(req.body || {});
+      audit(db, req.user.id, "ai.settings_updated", "settings", "ai", JSON.stringify({
+        enabled: settings.enabled,
+        baseUrl: settings.baseUrl,
+        model: settings.model,
+        defaultMode: settings.defaultMode
+      }));
+      res.json({ ai: settings });
+    } catch (error) {
+      return jsonError(res, error.code === "INVALID_INPUT" ? 400 : 400, error.message || "AI 配置保存失败");
+    }
+  });
+
+  app.post("/api/admin/ai/test", requireAdmin, asyncRoute(async (req, res) => {
+    if (!ai) return jsonError(res, 503, "AI 服务不可用");
+    try {
+      const result = await ai.testConnection();
+      audit(db, req.user.id, "ai.connection_tested", "settings", "ai");
+      res.json({ test: result });
+    } catch (error) {
+      const status = error.code === "NOT_CONFIGURED" ? 400 : 502;
+      return jsonError(res, status, error.message || "AI 连接测试失败");
+    }
+  }));
+
+  app.delete("/api/admin/ai", requireAdmin, (req, res) => {
+    if (!ai) return jsonError(res, 503, "AI 服务不可用");
+    const settings = ai.clearApiKey();
+    audit(db, req.user.id, "ai.credentials_cleared", "settings", "ai");
+    res.json({ ai: settings });
+  });
+
+  app.get("/api/ai/preferences", requireAuth, (req, res) => {
+    res.json({
+      ai: ai?.preferencesFor?.(req.user.id) || {
+        configured: false,
+        globalEnabled: false,
+        allowed: false,
+        enabled: false,
+        mode: "auto",
+        reason: "not_configured",
+        modes: []
+      }
+    });
+  });
+
+  app.patch("/api/ai/preferences", requireAuth, (req, res) => {
+    if (!ai) return jsonError(res, 503, "AI 服务不可用");
+    try {
+      const preferences = ai.savePreferences(req.user.id, req.body || {});
+      audit(db, req.user.id, "ai.preferences_updated", "user", req.user.id, JSON.stringify({
+        enabled: preferences.enabled,
+        mode: preferences.mode
+      }));
+      broadcaster?.broadcast?.({
+        type: "ai.preferences_updated",
+        user: toPublicUser(getUserById(req.user.id))
+      });
+      res.json({ ai: preferences });
+    } catch (error) {
+      const status = error.code === "FORBIDDEN" ? 403 : 400;
+      return jsonError(res, status, error.message || "AI 设置保存失败");
+    }
   });
 
   app.get("/api/admin/telegram", requireAdmin, asyncRoute(async (req, res) => {
@@ -565,6 +665,31 @@ function createApp({ db, config, telegram, whatsapp, broadcaster, logger, transl
     const conversation = accessibleConversation(req, id);
     if (!conversation) return jsonError(res, 404, "会话不存在");
     res.json({ conversation: toConversationSummary(conversation) });
+  });
+
+  app.get("/api/conversations/:id/ai-suggestion", requireAuth, (req, res) => {
+    const id = parseId(req.params.id);
+    const conversation = accessibleConversation(req, id);
+    if (!conversation) return jsonError(res, 404, "会话不存在");
+    res.json({ suggestion: getLatestAiSuggestion(db, id) });
+  });
+
+  app.patch("/api/conversations/:id/ai-suggestion/:suggestionId", requireAuth, (req, res) => {
+    const id = parseId(req.params.id);
+    const conversation = accessibleConversation(req, id);
+    if (!conversation) return jsonError(res, 404, "会话不存在");
+    const suggestionId = parseId(req.params.suggestionId);
+    const suggestion = suggestionId ? getAiSuggestionById(db, suggestionId) : null;
+    if (!suggestion || suggestion.conversation_id !== id) {
+      return jsonError(res, 404, "AI 建议不存在");
+    }
+    const status = String(req.body?.status || "");
+    if (!["used", "dismissed"].includes(status)) {
+      return jsonError(res, 400, "AI 建议状态不合法");
+    }
+    updateAiSuggestionStatus(db, suggestionId, status);
+    audit(db, req.user.id, "ai.suggestion_" + status, "conversation", id, String(suggestionId));
+    res.json({ ok: true });
   });
 
   app.get("/api/conversations/:id/messages", requireAuth, (req, res) => {

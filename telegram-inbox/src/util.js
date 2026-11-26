@@ -95,6 +95,9 @@ function toPublicUser(row) {
     displayName: row.display_name,
     role: row.role,
     active: Boolean(row.active),
+    aiAllowed: Boolean(row.ai_allowed),
+    aiEnabled: Boolean(row.ai_enabled),
+    aiMode: row.ai_mode || "auto",
     createdAt: row.created_at
   };
 }
@@ -122,6 +125,8 @@ function toPublicMessage(row) {
     translationLanguage: row.translation_language || null,
     deliveryStatus: row.delivery_status || null,
     deliveryUpdatedAt: row.delivery_updated_at || null,
+    aiStatus: row.ai_status || null,
+    aiError: row.ai_error || null,
     createdAt: row.created_at
   };
 }
@@ -149,6 +154,24 @@ function toConversationSummary(row) {
     unreadCount: Number(row.unread_count || 0),
     tags: parseTags(row.tags_json),
     notes: row.notes || "",
+    assigneeAiAllowed: Boolean(row.assignee_ai_allowed),
+    assigneeAiEnabled: Boolean(row.assignee_ai_enabled),
+    assigneeAiMode: row.assignee_ai_mode || "auto",
+    createdAt: row.created_at,
+    updatedAt: row.updated_at
+  };
+}
+
+function toPublicAiSuggestion(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    conversationId: row.conversation_id,
+    messageId: row.message_id,
+    agentId: row.agent_id,
+    body: row.body,
+    model: row.model || "",
+    status: row.status,
     createdAt: row.created_at,
     updatedAt: row.updated_at
   };
@@ -182,6 +205,7 @@ module.exports = {
   toPublicUser,
   toPublicMessage,
   toConversationSummary,
+  toPublicAiSuggestion,
   toCannedReply,
   parseTags
 };
