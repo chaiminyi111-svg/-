@@ -400,41 +400,50 @@
   }
 
   function ensureAudio() {
-    if (audioCtx) {
-      if (audioCtx.state === "suspended") audioCtx.resume();
-      return;
+    if (!audioCtx) {
+      var Ctx = window.AudioContext || window.webkitAudioContext;
+      if (!Ctx) return null;
+      try { audioCtx = new Ctx(); } catch (e) { audioCtx = null; return null; }
     }
-    var Ctx = window.AudioContext || window.webkitAudioContext;
-    if (Ctx) {
-      try { audioCtx = new Ctx(); } catch (e) { audioCtx = null; }
-    }
+    // Safari 首次创建时可能是 suspended，需要在用户点击时恢复
+    if (audioCtx.state === "suspended") audioCtx.resume();
+    return audioCtx;
   }
 
-  // 用 Web Audio 合成一段三音提示音，避免依赖外部音频文件
+  // 用 Web Audio 合成一段提示旋律，避免依赖外部音频文件
   function playChime() {
-    ensureAudio();
-    if (!audioCtx) return;
-    var now = audioCtx.currentTime;
-    var notes = [
-      { freq: 880, start: 0 },
-      { freq: 1174.66, start: 0.28 },
-      { freq: 1567.98, start: 0.56 }
-    ];
-    notes.forEach(function (note, index) {
-      [0, 1.1].forEach(function (offset) {
-        var t = now + note.start + offset;
-        var osc = audioCtx.createOscillator();
-        var gain = audioCtx.createGain();
-        osc.type = "sine";
-        osc.frequency.value = note.freq;
-        gain.gain.setValueAtTime(0.0001, t);
-        gain.gain.exponentialRampToValueAtTime(0.22, t + 0.02);
-        gain.gain.exponentialRampToValueAtTime(0.0001, t + 0.9);
-        osc.connect(gain).connect(audioCtx.destination);
-        osc.start(t);
-        osc.stop(t + 1);
+    var ctx = ensureAudio();
+    if (!ctx) return;
+
+    function schedule() {
+      var now = ctx.currentTime;
+      var notes = [
+        { freq: 880, start: 0 },
+        { freq: 1174.66, start: 0.28 },
+        { freq: 1567.98, start: 0.56 }
+      ];
+      notes.forEach(function (note) {
+        [0, 1.1].forEach(function (offset) {
+          var t = now + note.start + offset;
+          var osc = ctx.createOscillator();
+          var gain = ctx.createGain();
+          osc.type = "sine";
+          osc.frequency.value = note.freq;
+          gain.gain.setValueAtTime(0.0001, t);
+          gain.gain.exponentialRampToValueAtTime(0.22, t + 0.02);
+          gain.gain.exponentialRampToValueAtTime(0.0001, t + 0.9);
+          osc.connect(gain).connect(ctx.destination);
+          osc.start(t);
+          osc.stop(t + 1);
+        });
       });
-    });
+    }
+
+    if (ctx.state === "suspended") {
+      ctx.resume().then(schedule).catch(function () {});
+    } else {
+      schedule();
+    }
   }
 
   els.start.addEventListener("click", start);
@@ -452,6 +461,7 @@
   document.addEventListener("keydown", function (e) {
     if (e.target && /^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName)) return;
     if (e.code === "Space" || e.key === " ") {
+      if (e.target && e.target.tagName === "BUTTON") return;
       e.preventDefault();
       if (running) pause(); else start();
     } else if (e.key === "r" || e.key === "R") {
@@ -460,14 +470,22 @@
   });
 
   // 跨天时把计数归零
-  document.addEventListener("visibilitychange", function () {
-    if (!document.hidden && stats.date !== todayKey()) {
+  function refreshDay() {
+    if (stats.date !== todayKey()) {
       stats = { date: todayKey(), count: 0 };
       saveStats();
       renderStats();
     }
-    if (!document.hidden && running) tick();
+  }
+
+  document.addEventListener("visibilitychange", function () {
+    if (!document.hidden) {
+      refreshDay();
+      if (running) tick();
+    }
   });
+
+  setInterval(refreshDay, 60000);
 
   renderStats();
   setMode("focus");
