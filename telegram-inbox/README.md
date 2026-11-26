@@ -190,6 +190,19 @@ AI 只处理已分配给客服的私聊会话；群聊需要在「渠道」中�
 
 Pollinations 是免费公共接口，消息会发送到第三方服务，可能被记录或用于模型改进，只建议测试使用，不要发送敏感客户信息。需要隐私时请改用本地 Ollama，或在服务器上部署自己的 OpenAI 兼容模型。
 
+Pollinations 免费额度约每 45 秒 1 次请求，消息多时会出现 `HTTP 402`。程序会自动排队并重试，但回复会变慢。需要稳定、并发更高的自动回复，推荐本地 Ollama：
+
+```bash
+# 安装 Ollama（Linux）
+curl -fsSL https://ollama.com/install.sh | sh
+# 下载小模型（约 2GB，4 核 CPU 通常 3-6 秒生成一条）
+ollama pull qwen2.5:3b
+# 启动服务，监听 127.0.0.1:11434
+ollama serve
+```
+
+然后在「渠道 → AI 自动回复」选择「本地 Ollama（无需 Key）」，模型填 `qwen2.5:3b`，保存并测试连接。Docker 部署时，把地址改成 `http://host.docker.internal:11434/v1`，并让 Ollama 监听 `0.0.0.0`。
+
 ## Docker 部署
 
 ```bash
@@ -270,6 +283,7 @@ TRUST_PROXY=true
 | `AI_INCLUDE_GROUPS` | `false` | 群聊是否也自动回复 |
 | `AI_DELAY_MS` | `1500` | 收到消息后等待多久再生成回复，用于合并连续消息 |
 | `AI_TIMEOUT_MS` | `30000` | AI 接口请求超时毫秒数 |
+| `AI_PUBLIC_MIN_INTERVAL_MS` | `45000` | Pollinations 免费接口的最小请求间隔；本地 Ollama 不需要 |
 | `AI_MAX_CONTEXT` | `12` | 发送给 AI 的最近消息条数 |
 | `AUTO_ASSIGN` | `false` | 是否自动分配新会话；也可在「团队」页面开启 |
 | `AUTO_ASSIGN_STRATEGY` | `least_active` | `least_active`（当前接待最少）/ `round_robin`（轮询） |

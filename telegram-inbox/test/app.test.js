@@ -12,7 +12,7 @@ const { createBroadcaster } = require("../src/realtime");
 const { createTelegramService } = require("../src/telegram");
 const { createWhatsAppService } = require("../src/whatsapp");
 const { createTranslateService } = require("../src/translate");
-const { createAIService, isAfterHours } = require("../src/ai");
+const { createAIService, isAfterHours, isKeylessEndpoint, isPublicKeylessEndpoint, retryDelayMs } = require("../src/ai");
 const { autoAssignConversation, saveSettings } = require("../src/assignment");
 const { getStats } = require("../src/store");
 const { createApp } = require("../src/app");
@@ -1982,4 +1982,15 @@ test("AI supports keyless OpenAI-compatible endpoints", async t => {
   assert.equal(result.reply, "OK");
   assert.equal(mockAI.calls.length, 1);
   assert.equal(mockAI.authHeaders[0], null);
+});
+
+test("AI free endpoint helpers detect keyless hosts and retry delays", () => {
+  assert.equal(isPublicKeylessEndpoint("https://text.pollinations.ai/openai"), true);
+  assert.equal(isPublicKeylessEndpoint("https://example.com/v1"), false);
+  assert.equal(isKeylessEndpoint("http://127.0.0.1:11434/v1"), true);
+  assert.equal(isKeylessEndpoint("https://api.openai.com/v1"), false);
+
+  const response = (headers = {}) => ({ headers: { get: name => headers[name] ?? null } });
+  assert.equal(retryDelayMs(response({ "retry-after": "2" }), null), 2000);
+  assert.equal(retryDelayMs(response(), { error: { message: "Retry after 45s" } }), 45000);
 });

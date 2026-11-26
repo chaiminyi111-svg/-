@@ -107,6 +107,26 @@ function isKeylessEndpoint(baseUrl) {
   return isPublicKeylessEndpoint(baseUrl) || isLocalEndpoint(baseUrl);
 }
 
+const PUBLIC_RATE_LIMIT_MS = 45000;
+
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function retryDelayMs(response, data, fallbackMs = PUBLIC_RATE_LIMIT_MS) {
+  const header = response.headers.get("retry-after");
+  if (header) {
+    const seconds = Number(header);
+    if (Number.isFinite(seconds)) return Math.max(1000, Math.min(seconds * 1000, 60000));
+    const date = Date.parse(header);
+    if (Number.isFinite(date)) return Math.max(1000, Math.min(date - Date.now(), 60000));
+  }
+  const message = String(data?.error?.message || "");
+  const match = message.match(/(\d+)\s*(?:s|sec|seconds)/i);
+  if (match) return Math.max(1000, Math.min(Number(match[1]) * 1000, 60000));
+  return Math.max(1000, Math.min(fallbackMs, 60000));
+}
+
 function extractContent(data) {
   const choice = data?.choices?.[0];
   const content = choice?.message?.content ?? choice?.text;
@@ -151,6 +171,23 @@ function createAIService({ db, config = {}, logger, broadcaster, sendReply }) {
   const timers = new Map();
   const running = new Set();
   const rerun = new Set();
+  const configuredInterval = Number(config.aiPublicMinIntervalMs);
+  const publicMinIntervalMs = Number.isFinite(configuredInterval)
+    ? Math.max(configuredInterval, 0)
+    : PUBLIC_RATE_LIMIT_MS;
+  let publicQueue = Promise.resolve();
+  let lastPublicRequestAt = 0;
+
+  function enqueuePublicRequest(task) {
+    const run = publicQueue.then(async () => {
+      const waitMs = Math.max(0, publicMinIntervalMs - (Date.now() - lastPublicRequestAt));
+      if (waitMs > 0) await sleep(waitMs);
+      lastPublicRequestAt = Date.now();
+      return task();
+    });
+    publicQueue = run.catch(() => {});
+    return run;
+  }
 
   function configured() {
     return Boolean(baseUrl && model && (apiKey || isKeylessEndpoint(baseUrl)));
@@ -308,47 +345,74 @@ function createAIService({ db, config = {}, logger, broadcaster, sendReply }) {
 
   async function requestCompletion(messages, options = {}) {
     if (!configured()) throw new AIError("AI 服务未配置", "NOT_CONFIGURED");
-    const controller = new AbortController();
-    const timeout = setTimeout(
-      () => controller.abort(),
-      Math.max(Number(config.aiTimeoutMs) || 30000, 1000)
-    );
-    timeout.unref?.();
+    const publicEndpoint = isPublicKeylessEndpoint(baseUrl);
+    const maxAttempts = publicEndpoint ? 3 : 1;
 
-    const headers = { "content-type": "application/json" };
-    // 公共免费接口不应收到 Key；本地接口有 Key 时仍可发送
-    if (apiKey && !isPublicKeylessEndpoint(baseUrl)) headers.authorization = `Bearer ${apiKey}`;
+    const send = async attempt => {
+      const controller = new AbortController();
+      const timeout = setTimeout(
+        () => controller.abort(),
+        Math.max(Number(config.aiTimeoutMs) || 30000, 1000)
+      );
+      timeout.unref?.();
 
-    let response;
-    try {
-      response = await fetch(completionUrl(baseUrl), {
-        method: "POST",
-        headers,
-        body: JSON.stringify({
-          model,
-          messages,
-          temperature: options.temperature ?? temperature,
-          max_tokens: options.maxTokens ?? 600
-        }),
-        signal: controller.signal
-      });
-    } catch (error) {
-      if (error.name === "AbortError") throw new AIError("AI 接口请求超时", "AI_TIMEOUT");
-      throw new AIError("无法连接 AI 接口，请检查地址和网络", "AI_NETWORK");
-    } finally {
-      clearTimeout(timeout);
-    }
+      const headers = { "content-type": "application/json" };
+      // 公共免费接口不应收到 Key；本地接口有 Key 时仍可发送
+      if (apiKey && !publicEndpoint) headers.authorization = `Bearer ${apiKey}`;
 
-    let data = null;
-    try {
-      data = await response.json();
-    } catch {}
-    if (!response.ok) {
-      throw new AIError(`AI 接口请求失败（HTTP ${response.status}）`, "AI_HTTP");
-    }
-    const content = extractContent(data).trim();
-    if (!content) throw new AIError("AI 返回了空内容", "AI_EMPTY");
-    return content;
+      let response;
+      try {
+        response = await fetch(completionUrl(baseUrl), {
+          method: "POST",
+          headers,
+          body: JSON.stringify({
+            model,
+            messages,
+            temperature: options.temperature ?? temperature,
+            max_tokens: options.maxTokens ?? 600
+          }),
+          signal: controller.signal
+        });
+      } catch (error) {
+        if (error.name === "AbortError") {
+          if (publicEndpoint && attempt < maxAttempts) {
+            await sleep(1500 * attempt);
+            lastPublicRequestAt = Date.now();
+            return send(attempt + 1);
+          }
+          throw new AIError("AI 接口请求超时", "AI_TIMEOUT");
+        }
+        if (publicEndpoint && attempt < maxAttempts) {
+          await sleep(1500 * attempt);
+          lastPublicRequestAt = Date.now();
+          return send(attempt + 1);
+        }
+        throw new AIError("无法连接 AI 接口，请检查地址和网络", "AI_NETWORK");
+      } finally {
+        clearTimeout(timeout);
+      }
+
+      let data = null;
+      try {
+        data = await response.json();
+      } catch {}
+      if (!response.ok) {
+        if (publicEndpoint && attempt < maxAttempts && [402, 429, 500, 502, 503, 504].includes(response.status)) {
+          await sleep(retryDelayMs(response, data, publicMinIntervalMs));
+          lastPublicRequestAt = Date.now();
+          return send(attempt + 1);
+        }
+        if (response.status === 402 || response.status === 429) {
+          throw new AIError("免费 AI 接口限流，请稍后再试，或改用本地 Ollama", "AI_RATE_LIMIT");
+        }
+        throw new AIError(`AI 接口请求失败（HTTP ${response.status}）`, "AI_HTTP");
+      }
+      const content = extractContent(data).trim();
+      if (!content) throw new AIError("AI 返回了空内容", "AI_EMPTY");
+      return content;
+    };
+
+    return publicEndpoint ? enqueuePublicRequest(() => send(1)) : send(1);
   }
 
   async function testConnection() {
@@ -593,5 +657,8 @@ module.exports = {
   DEFAULT_SYSTEM_PROMPT,
   createAIService,
   isAfterHours,
-  normalizeMode
+  isKeylessEndpoint,
+  isPublicKeylessEndpoint,
+  normalizeMode,
+  retryDelayMs
 };

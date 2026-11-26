@@ -58,6 +58,7 @@ const config = {
   aiIncludeGroups: readBool("AI_INCLUDE_GROUPS", false),
   aiDelayMs: Math.max(readInt("AI_DELAY_MS", 1500), 0),
   aiTimeoutMs: Math.max(readInt("AI_TIMEOUT_MS", 30000), 1000),
+  aiPublicMinIntervalMs: Math.max(readInt("AI_PUBLIC_MIN_INTERVAL_MS", 45000), 0),
   aiMaxContext: Math.min(Math.max(readInt("AI_MAX_CONTEXT", 12), 2), 40),
   autoAssign: readBool("AUTO_ASSIGN", false),
   autoAssignStrategy: (process.env.AUTO_ASSIGN_STRATEGY || "least_active").trim(),

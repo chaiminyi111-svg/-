@@ -2221,7 +2221,7 @@ function updateAiPresetHint() {
   let host = "";
   try { host = new URL($("#aiBaseUrl").value.trim()).hostname.toLowerCase(); } catch {}
   if (host === "pollinations.ai" || host.endsWith(".pollinations.ai")) {
-    hint.textContent = "免费公共接口无需 API Key。消息会发送到第三方服务，可能被记录或用于模型改进；仅建议测试，不要发送敏感客户信息。";
+    hint.textContent = "免费公共接口无需 API Key，但约 45 秒只能请求 1 次，消息多时会排队。消息会发送到第三方服务，可能被记录或用于模型改进；仅建议测试，不要发送敏感客户信息。";
     hint.hidden = false;
   } else if (["localhost", "127.0.0.1", "0.0.0.0", "::1", "[::1]", "host.docker.internal"].includes(host)) {
     hint.textContent = "本地模型无需 API Key，但需要先运行 Ollama 等服务并下载模型。";
