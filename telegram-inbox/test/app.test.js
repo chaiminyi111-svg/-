@@ -221,8 +221,9 @@ function startMockTranslate() {
   });
 }
 
-function startMockAI() {
+function startMockAI({ requireKey = true } = {}) {
   const calls = [];
+  const authHeaders = [];
   const server = http.createServer(async (req, res) => {
     let body = "";
     for await (const chunk of req) body += chunk;
@@ -232,7 +233,7 @@ function startMockAI() {
       res.end("{}");
       return;
     }
-    if (req.headers.authorization !== "Bearer test-ai-key") {
+    if (requireKey && req.headers.authorization !== "Bearer test-ai-key") {
       res.statusCode = 401;
       res.setHeader("content-type", "application/json");
       res.end(JSON.stringify({ error: { message: "bad key" } }));
@@ -240,6 +241,7 @@ function startMockAI() {
     }
     const payload = JSON.parse(body || "{}");
     calls.push(payload);
+    authHeaders.push(req.headers.authorization || null);
     const last = String(payload.messages?.at(-1)?.content || "");
     let content = "您好，已经收到您的问题，我们会尽快为您处理。";
     if (last.includes("退款")) content = "可以帮您核实退款进度，请提供订单号。";
@@ -252,7 +254,8 @@ function startMockAI() {
       resolve({
         server,
         base: `http://127.0.0.1:${server.address().port}/v1`,
-        calls
+        calls,
+        authHeaders
       });
     });
   });
@@ -1933,4 +1936,50 @@ test("AI auto reply respects permissions, suggestions and modes", async t => {
     { workStart: "09:00", workEnd: "18:00", workTimezone: "Asia/Shanghai" },
     new Date("2026-01-01T02:00:00Z")
   ), false);
+});
+
+test("AI supports keyless OpenAI-compatible endpoints", async t => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "ai-keyless-test-"));
+  const mockAI = await startMockAI({ requireKey: false });
+  const config = {
+    dataDir: tempDir,
+    dbPath: path.join(tempDir, "test.db"),
+    aiEnabled: true,
+    aiApiKey: "",
+    aiBaseUrl: mockAI.base,
+    aiModel: "mock-model",
+    aiDefaultMode: "auto",
+    aiWorkStart: "09:00",
+    aiWorkEnd: "18:00",
+    aiWorkTimezone: "Asia/Shanghai",
+    aiIncludeGroups: false,
+    aiDelayMs: 5,
+    aiTimeoutMs: 3000,
+    aiMaxContext: 12
+  };
+  const db = openDatabase(config.dbPath);
+  const ai = createAIService({ db, config, logger: createLogger("error") });
+
+  t.after(async () => {
+    ai.close();
+    db.close();
+    await new Promise(resolve => mockAI.server.close(resolve));
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  const saved = ai.saveSettings({
+    baseUrl: mockAI.base,
+    apiKey: "",
+    model: "mock-model",
+    enabled: true
+  });
+  assert.equal(saved.configured, true);
+  assert.equal(saved.keyless, true);
+  assert.equal(saved.hasApiKey, false);
+  assert.equal(saved.source, "keyless");
+
+  const result = await ai.testConnection();
+  assert.equal(result.reply, "OK");
+  assert.equal(mockAI.calls.length, 1);
+  assert.equal(mockAI.authHeaders[0], null);
 });

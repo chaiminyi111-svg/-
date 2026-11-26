@@ -637,11 +637,14 @@
           服务商预设
           <select id="aiPreset">
             <option value="custom">自定义 OpenAI 兼容接口</option>
+            <option value="pollinations">Pollinations 免费接口（无需 Key）</option>
+            <option value="ollama">本地 Ollama（无需 Key）</option>
             <option value="openai">OpenAI</option>
             <option value="deepseek">DeepSeek</option>
             <option value="qwen">通义千问（DashScope 兼容模式）</option>
             <option value="zhipu">智谱 GLM</option>
           </select>
+          <span class="channel-note preset-hint" id="aiPresetHint" hidden></span>
         </label>
 
         <label>
@@ -650,7 +653,7 @@
         </label>
 
         <label id="aiKeyLabel">
-          API Key
+          API Key <span class="channel-note">（免费/本地接口可留空）</span>
           <input id="aiApiKey" type="password" autocomplete="off" spellcheck="false" maxlength="500" placeholder="sk-...">
         </label>
 

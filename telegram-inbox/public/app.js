@@ -2200,25 +2200,53 @@ async function clearTranslateKey() {
 
 /* ---------- AI settings ---------- */
 const AI_PRESETS = {
+  pollinations: { baseUrl: "https://text.pollinations.ai/openai", model: "openai" },
+  ollama: { baseUrl: "http://127.0.0.1:11434/v1", model: "qwen2.5:3b" },
   openai: { baseUrl: "https://api.openai.com/v1", model: "gpt-4o-mini" },
   deepseek: { baseUrl: "https://api.deepseek.com/v1", model: "deepseek-chat" },
   qwen: { baseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1", model: "qwen-plus" },
   zhipu: { baseUrl: "https://open.bigmodel.cn/api/paas/v4", model: "glm-4-flash" }
 };
 
+function aiPresetKey(baseUrl) {
+  const normalized = String(baseUrl || "").replace(/\/+$/, "");
+  for (const [key, preset] of Object.entries(AI_PRESETS)) {
+    if (preset.baseUrl.replace(/\/+$/, "") === normalized) return key;
+  }
+  return "custom";
+}
+
+function updateAiPresetHint() {
+  const hint = $("#aiPresetHint");
+  let host = "";
+  try { host = new URL($("#aiBaseUrl").value.trim()).hostname.toLowerCase(); } catch {}
+  if (host === "pollinations.ai" || host.endsWith(".pollinations.ai")) {
+    hint.textContent = "免费公共接口无需 API Key。消息会发送到第三方服务，可能被记录或用于模型改进；仅建议测试，不要发送敏感客户信息。";
+    hint.hidden = false;
+  } else if (["localhost", "127.0.0.1", "0.0.0.0", "::1", "[::1]", "host.docker.internal"].includes(host)) {
+    hint.textContent = "本地模型无需 API Key，但需要先运行 Ollama 等服务并下载模型。";
+    hint.hidden = false;
+  } else {
+    hint.hidden = true;
+    hint.textContent = "";
+  }
+}
+
 function renderAiSettings() {
   const settings = state.channels.ai || {};
   const configured = Boolean(settings.configured);
+  const keyless = Boolean(settings.keyless);
   $("#aiDot").className = "channel-dot " + (configured && settings.enabled ? "on" : "off");
   let text;
   if (!configured) {
-    text = "未配置，填写 API Key、接口地址和模型后启用";
+    text = "未配置，填写接口地址和模型；需要鉴权的服务再填 API Key";
   } else if (settings.enabled) {
     text = `已启用 · ${settings.model || "模型未填写"}`;
-    if (settings.source === "environment") text += " · 来自环境变量";
+    if (keyless) text += " · 免费接口（无需 Key）";
+    else if (settings.source === "environment") text += " · 来自环境变量";
     else if (settings.source === "database") text += " · 已保存到服务器";
   } else {
-    text = "已配置，但总开关关闭";
+    text = keyless ? "已配置免费接口，但总开关关闭" : "已配置，但总开关关闭";
   }
   $("#aiStatusText").textContent = text;
   $("#aiEnabled").checked = Boolean(settings.enabled);
@@ -2231,11 +2259,15 @@ function renderAiSettings() {
   $("#aiWorkTimezone").value = settings.workTimezone || "Asia/Shanghai";
   $("#aiIncludeGroups").checked = Boolean(settings.includeGroups);
   $("#aiDelayMs").value = Number(settings.delayMs ?? 1500);
-  $("#aiApiKey").placeholder = settings.hasApiKey
-    ? (settings.source === "environment" ? "已配置（来自环境变量）" : "已配置，留空保持不变")
-    : "sk-...";
+  $("#aiPreset").value = aiPresetKey(settings.baseUrl);
+  $("#aiApiKey").placeholder = keyless
+    ? "无需 API Key，可留空"
+    : settings.hasApiKey
+      ? (settings.source === "environment" ? "已配置（来自环境变量）" : "已配置，留空保持不变")
+      : "sk-...";
   $("#aiClearBtn").hidden = !settings.hasApiKey || settings.source === "environment";
   $("#aiTestBtn").disabled = !configured;
+  updateAiPresetHint();
 }
 
 function applyAiPreset() {
@@ -2243,6 +2275,7 @@ function applyAiPreset() {
   if (!preset) return;
   $("#aiBaseUrl").value = preset.baseUrl;
   $("#aiModel").value = preset.model;
+  updateAiPresetHint();
 }
 
 async function saveAiSettings(event) {
@@ -2839,6 +2872,7 @@ function bindEvents() {
   });
   $("#aiForm").addEventListener("submit", saveAiSettings);
   $("#aiPreset").addEventListener("change", applyAiPreset);
+  $("#aiBaseUrl").addEventListener("input", updateAiPresetHint);
   $("#aiTestBtn").addEventListener("click", testAiConnection);
   $("#aiClearBtn").addEventListener("click", clearAiKey);
 

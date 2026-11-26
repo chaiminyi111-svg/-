@@ -996,6 +996,12 @@ textarea {
   line-height: 1.6;
 }
 
+.preset-hint {
+  display: block;
+  margin-top: 4px;
+  color: var(--amber);
+}
+
 .channel-actions {
   display: flex;
   flex-wrap: wrap;

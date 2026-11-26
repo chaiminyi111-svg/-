@@ -83,6 +83,30 @@ function completionUrl(baseUrl) {
   return /\/chat\/completions$/i.test(base) ? base : base + "/chat/completions";
 }
 
+function endpointHost(baseUrl) {
+  try {
+    return new URL(baseUrl).hostname.toLowerCase();
+  } catch {
+    return "";
+  }
+}
+
+// Pollinations 是公共免费接口，不应把用户已保存的 Key 发给它
+function isPublicKeylessEndpoint(baseUrl) {
+  const host = endpointHost(baseUrl);
+  return host === "pollinations.ai" || host.endsWith(".pollinations.ai");
+}
+
+function isLocalEndpoint(baseUrl) {
+  return ["localhost", "127.0.0.1", "0.0.0.0", "::1", "[::1]", "host.docker.internal"]
+    .includes(endpointHost(baseUrl));
+}
+
+// 这些地址允许不填 API Key：本地模型，或 Pollinations 的免费公共接口
+function isKeylessEndpoint(baseUrl) {
+  return isPublicKeylessEndpoint(baseUrl) || isLocalEndpoint(baseUrl);
+}
+
 function extractContent(data) {
   const choice = data?.choices?.[0];
   const content = choice?.message?.content ?? choice?.text;
@@ -121,15 +145,15 @@ function createAIService({ db, config = {}, logger, broadcaster, sendReply }) {
     ? Number(stored("temperature"))
     : Number(config.aiTemperature ?? 0.4);
   let source = stored("api_key") !== null
-    ? (apiKey ? "database" : "none")
-    : (config.aiApiKey ? "environment" : "none");
+    ? (apiKey ? "database" : (isKeylessEndpoint(baseUrl) ? "keyless" : "none"))
+    : (config.aiApiKey ? "environment" : (isKeylessEndpoint(baseUrl) ? "keyless" : "none"));
 
   const timers = new Map();
   const running = new Set();
   const rerun = new Set();
 
   function configured() {
-    return Boolean(apiKey && baseUrl && model);
+    return Boolean(baseUrl && model && (apiKey || isKeylessEndpoint(baseUrl)));
   }
 
   function status() {
@@ -137,6 +161,7 @@ function createAIService({ db, config = {}, logger, broadcaster, sendReply }) {
       configured: configured(),
       enabled,
       source,
+      keyless: isKeylessEndpoint(baseUrl),
       baseUrl,
       model,
       hasApiKey: Boolean(apiKey),
@@ -199,6 +224,7 @@ function createAIService({ db, config = {}, logger, broadcaster, sendReply }) {
       setSetting(db, "ai_api_key", apiKey);
     }
     baseUrl = nextBaseUrl.replace(/\/+$/, "");
+    if (!apiKey) source = isKeylessEndpoint(baseUrl) ? "keyless" : (config.aiApiKey ? "environment" : "none");
     model = nextModel;
     defaultMode = nextMode;
     systemPrompt = nextPrompt;
@@ -229,7 +255,7 @@ function createAIService({ db, config = {}, logger, broadcaster, sendReply }) {
   function clearApiKey() {
     setSetting(db, "ai_api_key", "");
     apiKey = config.aiApiKey || "";
-    source = config.aiApiKey ? "environment" : "none";
+    source = config.aiApiKey ? "environment" : (isKeylessEndpoint(baseUrl) ? "keyless" : "none");
     enabled = false;
     setSetting(db, "ai_enabled", "0");
     return status();
@@ -289,14 +315,15 @@ function createAIService({ db, config = {}, logger, broadcaster, sendReply }) {
     );
     timeout.unref?.();
 
+    const headers = { "content-type": "application/json" };
+    // 公共免费接口不应收到 Key；本地接口有 Key 时仍可发送
+    if (apiKey && !isPublicKeylessEndpoint(baseUrl)) headers.authorization = `Bearer ${apiKey}`;
+
     let response;
     try {
       response = await fetch(completionUrl(baseUrl), {
         method: "POST",
-        headers: {
-          "content-type": "application/json",
-          authorization: `Bearer ${apiKey}`
-        },
+        headers,
         body: JSON.stringify({
           model,
           messages,
@@ -325,7 +352,7 @@ function createAIService({ db, config = {}, logger, broadcaster, sendReply }) {
   }
 
   async function testConnection() {
-    if (!configured()) throw new AIError("请先填写并保存 API Key、接口地址和模型", "NOT_CONFIGURED");
+    if (!configured()) throw new AIError("请先填写并保存接口地址和模型；需要鉴权的服务还要填写 API Key", "NOT_CONFIGURED");
     const reply = await requestCompletion(
       [
         { role: "system", content: "你是连接测试助手。" },
