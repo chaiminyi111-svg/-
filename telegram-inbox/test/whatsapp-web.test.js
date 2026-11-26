@@ -91,6 +91,35 @@ test("WhatsApp Web helpers parse private JIDs and message types", () => {
   assert.equal(contentOf({ message: { imageMessage: {} } }).body, "[图片]");
 });
 
+test("WhatsApp Web reuses a stored session when Baileys leaves registered false", async () => {
+  const ctx = createTestContext();
+  try {
+    fs.mkdirSync(ctx.config.whatsappWebSessionPath, { recursive: true });
+    fs.writeFileSync(
+      path.join(ctx.config.whatsappWebSessionPath, "creds.json"),
+      JSON.stringify({
+        registered: false,
+        me: { id: "8617350578910:2@s.whatsapp.net", name: "Ricky" }
+      })
+    );
+    ctx.fake.client.user = { id: "8617350578910:2@s.whatsapp.net" };
+
+    assert.equal(ctx.service.configured, true);
+    await ctx.service.start();
+    assert.equal(ctx.service.status().loginInProgress, true);
+
+    ctx.fake.handlers.get("connection.update")({ connection: "open" });
+    await flush();
+
+    const connected = ctx.service.status();
+    assert.equal(connected.running, true);
+    assert.equal(connected.me.name, "Ricky");
+    assert.equal(connected.me.phone, "8617350578910");
+  } finally {
+    ctx.cleanup();
+  }
+});
+
 test("WhatsApp Web QR login, inbound text, outbound reply and logout", async () => {
   const ctx = createTestContext();
   try {

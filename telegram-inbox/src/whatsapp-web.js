@@ -53,7 +53,9 @@ function readCreds(sessionPath) {
 }
 
 function isRegistered(creds) {
-  return Boolean(creds && creds.registered && creds.me && creds.me.id);
+  // Baileys can leave creds.registered false after a successful QR pairing.
+  // A stored identity is the reliable signal that the session can be reused.
+  return Boolean(creds && creds.me && creds.me.id);
 }
 
 function secureSessionDirectory(directory) {
@@ -122,12 +124,14 @@ function contentOf(message) {
   return { type: "unknown", body: "[暂不支持的消息类型]", meta: {} };
 }
 
-function publicMe(user) {
-  if (!user) return null;
+function publicMe(user, fallback) {
+  const source = user || {};
+  const stored = fallback || {};
+  const id = source.id || stored.id || "";
   return {
-    id: user.id || "",
-    name: user.name || user.verifiedName || "",
-    phone: user.phone || ""
+    id,
+    name: source.name || source.verifiedName || stored.name || stored.verifiedName || "",
+    phone: source.phone || stored.phone || jidNumber(id)
   };
 }
 
@@ -227,7 +231,7 @@ function createWhatsAppWebService({
       qrDataUrl = null;
       loggedOut = false;
       lastError = null;
-      me = publicMe(socket?.user);
+      me = publicMe(socket?.user, readCreds(sessionPath)?.me);
       logger?.info(`WhatsApp 个人号：已连接${me?.name ? " " + me.name : ""}`);
       return;
     }
