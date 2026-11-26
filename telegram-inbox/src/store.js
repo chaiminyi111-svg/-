@@ -11,9 +11,15 @@ const CONVERSATION_SELECT = `
          u.username AS assignee_username,
          u.ai_allowed AS assignee_ai_allowed,
          u.ai_enabled AS assignee_ai_enabled,
-         u.ai_mode AS assignee_ai_mode
+         u.ai_mode AS assignee_ai_mode,
+         a.label AS account_label,
+         a.owner_id AS account_owner_id,
+         a.display_name AS account_display_name,
+         ao.display_name AS account_owner_name
   FROM conversations c
   LEFT JOIN users u ON u.id = c.assignee_id
+  LEFT JOIN channel_accounts a ON a.id = c.account_id
+  LEFT JOIN users ao ON ao.id = a.owner_id
 `;
 
 function escapeLike(value) {
@@ -28,6 +34,19 @@ function getConversationByChatId(db, chatId) {
   return db.prepare(`${CONVERSATION_SELECT} WHERE c.telegram_chat_id = ?`).get(String(chatId));
 }
 
+function applyModeFilter(where, params, options) {
+  const mode = options.mode === "personal" ? "personal" : options.mode === "shared" ? "shared" : "all";
+  if (mode === "shared") {
+    where.push("c.account_id IS NULL");
+  } else if (mode === "personal") {
+    where.push("c.account_id IS NOT NULL");
+    if (options.isAdmin === false) {
+      where.push("c.account_id IN (SELECT id FROM channel_accounts WHERE owner_id = ?)");
+      params.push(options.userId);
+    }
+  }
+}
+
 function listConversations(db, options) {
   const scope = ["mine", "unassigned", "all"].includes(options.scope) ? options.scope : "all";
   const status = ["open", "pending", "closed", "all"].includes(options.status) ? options.status : "open";
@@ -35,6 +54,8 @@ function listConversations(db, options) {
   const offset = Math.max(Number(options.offset) || 0, 0);
   const where = [];
   const params = [];
+
+  applyModeFilter(where, params, options);
 
   if (options.isAdmin === false) {
     where.push("c.assignee_id = ?");
@@ -81,15 +102,21 @@ function listConversations(db, options) {
 }
 
 function getConversationCounts(db, options = {}) {
-  const where = options.isAdmin === false ? " WHERE assignee_id = ?" : "";
-  const params = options.isAdmin === false ? [options.userId] : [];
+  const where = [];
+  const params = [];
+  applyModeFilter(where, params, options);
+  if (options.isAdmin === false) {
+    where.push("assignee_id = ?");
+    params.push(options.userId);
+  }
+  const whereSql = where.length ? " WHERE " + where.join(" AND ") : "";
   const row = db.prepare(
     `SELECT COUNT(*) AS total,
             SUM(CASE WHEN assignee_id IS NULL THEN 1 ELSE 0 END) AS unassigned,
             SUM(CASE WHEN status = 'open' THEN 1 ELSE 0 END) AS open,
             SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) AS pending,
             SUM(CASE WHEN status = 'closed' THEN 1 ELSE 0 END) AS closed
-     FROM conversations${where}`
+     FROM conversations c${whereSql}`
   ).get(...params);
 
   return {

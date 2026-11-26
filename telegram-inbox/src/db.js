@@ -28,10 +28,25 @@ CREATE TABLE IF NOT EXISTS sessions (
 );
 CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions(expires_at);
 
+CREATE TABLE IF NOT EXISTS channel_accounts (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  channel TEXT NOT NULL CHECK (channel IN ('whatsapp_web', 'telegram_user')),
+  owner_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  label TEXT NOT NULL,
+  session_path TEXT NOT NULL,
+  external_id TEXT,
+  display_name TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE (channel, owner_id)
+);
+CREATE INDEX IF NOT EXISTS idx_channel_accounts_owner ON channel_accounts(owner_id);
+
 CREATE TABLE IF NOT EXISTS conversations (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   telegram_chat_id TEXT NOT NULL UNIQUE,
   channel TEXT NOT NULL DEFAULT 'telegram',
+  account_id INTEGER REFERENCES channel_accounts(id) ON DELETE SET NULL,
   chat_type TEXT NOT NULL DEFAULT 'private',
   title TEXT NOT NULL,
   username TEXT,
@@ -137,6 +152,7 @@ function openDatabase(dbPath) {
   db.exec(SCHEMA);
   migrateUserRoles(db);
   ensureColumn(db, "conversations", "channel", "TEXT NOT NULL DEFAULT 'telegram'");
+  ensureColumn(db, "conversations", "account_id", "INTEGER REFERENCES channel_accounts(id) ON DELETE SET NULL");
   ensureColumn(db, "conversations", "notes", "TEXT NOT NULL DEFAULT ''");
   ensureColumn(db, "conversations", "tags_json", "TEXT NOT NULL DEFAULT '[]'");
   ensureColumn(db, "conversations", "assigned_at", "TEXT");
@@ -155,6 +171,7 @@ function openDatabase(dbPath) {
   ensureColumn(db, "messages", "ai_error", "TEXT");
   ensureColumn(db, "messages", "ai_reply_message_id", "INTEGER");
   ensureColumn(db, "messages", "ai_updated_at", "TEXT");
+  db.exec("CREATE INDEX IF NOT EXISTS idx_conversations_account ON conversations(account_id)");
   db.exec("UPDATE users SET ai_allowed = 1 WHERE role = 'admin'");
   db.exec(`
     UPDATE conversations

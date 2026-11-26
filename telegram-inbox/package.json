@@ -17,8 +17,10 @@
   },
   "dependencies": {
     "baileys": "7.0.0-rc14",
+    "big-integer": "^1.6.52",
     "dotenv": "^16.4.7",
     "express": "^4.21.2",
-    "qrcode": "^1.5.4"
+    "qrcode": "^1.5.4",
+    "teleproto": "^1.234.0"
   }
 }

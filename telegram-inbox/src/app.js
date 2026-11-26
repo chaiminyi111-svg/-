@@ -43,7 +43,7 @@ function parseId(value) {
   return Number.isFinite(id) && id > 0 ? id : null;
 }
 
-function createApp({ db, config, telegram, whatsapp, whatsappWeb, broadcaster, logger, translate, ai }) {
+function createApp({ db, config, telegram, whatsapp, whatsappWeb, accounts, broadcaster, logger, translate, ai }) {
   const app = express();
   app.disable("x-powered-by");
   app.set("trust proxy", config.trustProxy ? 1 : false);
@@ -76,7 +76,10 @@ function createApp({ db, config, telegram, whatsapp, whatsappWeb, broadcaster, l
     const conversation = id ? getConversationById(db, id) : null;
     if (!conversation) return null;
     if (req.user.role === "admin") return conversation;
-    if (req.user.role === "agent" && conversation.assignee_id === req.user.id) {
+    if (
+      req.user.role === "agent" &&
+      (conversation.assignee_id === req.user.id || conversation.account_owner_id === req.user.id)
+    ) {
       return conversation;
     }
     return null;
@@ -150,6 +153,8 @@ function createApp({ db, config, telegram, whatsapp, whatsappWeb, broadcaster, l
       whatsappWebEnabled: Boolean(whatsappWeb?.status?.().enabled),
       whatsappWebConfigured: Boolean(whatsappWeb?.configured),
       whatsappWebRunning: Boolean(whatsappWeb?.running),
+      personalAccountsEnabled: Boolean(accounts?.enabled),
+      telegramUserEnabled: Boolean(config.telegramUserEnabled),
       translationConfigured: Boolean(translate?.configured?.()),
       aiConfigured: Boolean(ai?.configured?.()),
       aiEnabled: Boolean(ai?.status?.().enabled),
@@ -671,24 +676,143 @@ function createApp({ db, config, telegram, whatsapp, whatsappWeb, broadcaster, l
     }
   }));
 
+  function accountErrorResponse(res, error) {
+    const status = error?.code === "NOT_FOUND" ? 404
+      : error?.code === "NOT_CONFIGURED" ? 503
+        : error?.code === "INVALID_INPUT" ? 400
+          : error?.code === "CONFLICT" ? 409
+            : 502;
+    return jsonError(res, status, error?.message || "个人号操作失败");
+  }
+
+  app.get("/api/accounts", requireAuth, (req, res) => {
+    if (!accounts) return jsonError(res, 503, "个人号服务未启动");
+    const all = req.query.all === "1" && req.user.role === "admin";
+    res.json({
+      enabled: accounts.enabled,
+      channels: [
+        {
+          channel: "whatsapp_web",
+          label: "WhatsApp",
+          available: accounts.channelAvailable("whatsapp_web"),
+          hint: accounts.channelHint("whatsapp_web")
+        },
+        {
+          channel: "telegram_user",
+          label: "Telegram",
+          available: accounts.channelAvailable("telegram_user"),
+          hint: accounts.channelHint("telegram_user")
+        }
+      ],
+      accounts: accounts.list(req.user, { all })
+    });
+  });
+
+  app.get("/api/accounts/:id", requireAuth, (req, res) => {
+    if (!accounts) return jsonError(res, 503, "个人号服务未启动");
+    const id = parseId(req.params.id);
+    const account = id ? accounts.get(req.user, id) : null;
+    if (!account) return jsonError(res, 404, "个人号账号不存在");
+    res.json({ account });
+  });
+
+  app.post("/api/accounts", requireAuth, (req, res) => {
+    if (!accounts) return jsonError(res, 503, "个人号服务未启动");
+    try {
+      const row = accounts.ensureAccount(
+        req.user,
+        String(req.body?.channel || ""),
+        String(req.body?.label || "")
+      );
+      const account = accounts.get(req.user, row.id);
+      audit(db, req.user.id, "account.created", "channel_account", row.id, row.channel);
+      res.status(201).json({ account });
+    } catch (error) {
+      return accountErrorResponse(res, error);
+    }
+  });
+
+  app.post("/api/accounts/:id/login", requireAuth, asyncRoute(async (req, res) => {
+    if (!accounts) return jsonError(res, 503, "个人号服务未启动");
+    const id = parseId(req.params.id);
+    if (!id) return jsonError(res, 404, "个人号账号不存在");
+    try {
+      const account = await accounts.beginLogin(req.user, id);
+      audit(db, req.user.id, "account.login_started", "channel_account", id, account.channel);
+      res.json({ account });
+    } catch (error) {
+      return accountErrorResponse(res, error);
+    }
+  }));
+
+  app.post("/api/accounts/:id/password", requireAuth, asyncRoute(async (req, res) => {
+    if (!accounts) return jsonError(res, 503, "个人号服务未启动");
+    const id = parseId(req.params.id);
+    if (!id) return jsonError(res, 404, "个人号账号不存在");
+    try {
+      const account = await accounts.submitPassword(req.user, id, req.body?.password);
+      audit(db, req.user.id, "account.password_submitted", "channel_account", id);
+      res.json({ account });
+    } catch (error) {
+      return accountErrorResponse(res, error);
+    }
+  }));
+
+  app.post("/api/accounts/:id/logout", requireAuth, asyncRoute(async (req, res) => {
+    if (!accounts) return jsonError(res, 503, "个人号服务未启动");
+    const id = parseId(req.params.id);
+    if (!id) return jsonError(res, 404, "个人号账号不存在");
+    try {
+      const account = await accounts.logout(req.user, id);
+      audit(db, req.user.id, "account.logged_out", "channel_account", id);
+      res.json({ account });
+    } catch (error) {
+      return accountErrorResponse(res, error);
+    }
+  }));
+
+  app.delete("/api/accounts/:id", requireAuth, asyncRoute(async (req, res) => {
+    if (!accounts) return jsonError(res, 503, "个人号服务未启动");
+    const id = parseId(req.params.id);
+    if (!id) return jsonError(res, 404, "个人号账号不存在");
+    try {
+      await accounts.remove(req.user, id);
+      audit(db, req.user.id, "account.removed", "channel_account", id);
+      res.json({ ok: true });
+    } catch (error) {
+      return accountErrorResponse(res, error);
+    }
+  }));
+
   app.get("/api/conversations", requireAuth, (req, res) => {
+    const mode = req.query.mode === "personal" ? "personal" : "shared";
     const result = listConversations(db, {
       scope: req.query.scope,
       status: req.query.status,
       q: req.query.q,
+      mode,
       userId: req.user.id,
       isAdmin: req.user.role === "admin",
       limit: req.query.limit,
       offset: req.query.offset
     });
     const counts = getConversationCounts(db, {
+      mode,
       userId: req.user.id,
       isAdmin: req.user.role === "admin"
     });
+    const mineWhere = ["assignee_id = ?"];
+    const mineParams = [req.user.id];
+    if (mode === "personal") {
+      mineWhere.push("account_id IS NOT NULL");
+    } else {
+      mineWhere.push("account_id IS NULL");
+    }
     counts.mine = Number(
-      db.prepare("SELECT COUNT(*) AS c FROM conversations WHERE assignee_id = ?").get(req.user.id).c
+      db.prepare(`SELECT COUNT(*) AS c FROM conversations WHERE ${mineWhere.join(" AND ")}`)
+        .get(...mineParams).c
     );
-    res.json({ ...result, counts });
+    res.json({ ...result, counts, mode });
   });
 
   app.get("/api/conversations/:id", requireAuth, (req, res) => {
@@ -747,10 +871,12 @@ function createApp({ db, config, telegram, whatsapp, whatsappWeb, broadcaster, l
     }
     const channel = conversation.channel || "telegram";
     const targetLanguage = String(req.body?.targetLanguage || "auto").slice(0, 20);
-    const service = channel === "whatsapp" ? whatsapp
-      : channel === "whatsapp_web" ? whatsappWeb
-        : telegram;
-    if (!service?.configured) {
+    const service = conversation.account_id
+      ? accounts
+      : channel === "whatsapp" ? whatsapp
+        : channel === "whatsapp_web" ? whatsappWeb
+          : telegram;
+    if (!conversation.account_id && !service?.configured) {
       return jsonError(res, 503, channel === "whatsapp"
         ? "未配置 WhatsApp Cloud API 凭据，暂时无法发送消息"
         : channel === "whatsapp_web"

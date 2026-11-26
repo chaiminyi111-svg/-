@@ -144,10 +144,14 @@ function createWhatsAppWebService({
   hooks = {},
   clientFactory,
   authLoader,
-  qrEncoder
+  qrEncoder,
+  account = null
 }) {
   const enabled = Boolean(config.whatsappWebEnabled);
-  const sessionPath = config.whatsappWebSessionPath;
+  const accountId = account?.id || null;
+  const ownerId = account?.owner_id ?? account?.ownerId ?? null;
+  const sessionPath = account?.session_path || account?.sessionPath || config.whatsappWebSessionPath;
+  const scopeLabel = account?.label ? `WhatsApp 个人号（${account.label}）` : "WhatsApp 个人号";
 
   let socket = null;
   let connecting = false;
@@ -232,7 +236,7 @@ function createWhatsAppWebService({
       loggedOut = false;
       lastError = null;
       me = publicMe(socket?.user, readCreds(sessionPath)?.me);
-      logger?.info(`WhatsApp 个人号：已连接${me?.name ? " " + me.name : ""}`);
+      logger?.info(`${scopeLabel}：已连接${me?.name ? " " + me.name : ""}`);
       return;
     }
 
@@ -241,6 +245,11 @@ function createWhatsAppWebService({
       loginInProgress = false;
       qrDataUrl = null;
       socket = null;
+      me = null;
+      if (stopping) {
+        lastError = null;
+        return;
+      }
       const code = disconnectReason(update);
       const reason = update?.lastDisconnect?.error?.message || "";
       const loggedOutNow = code === 401 || code === 403 || /logged out/i.test(reason);
@@ -422,7 +431,7 @@ function createWhatsAppWebService({
     const messageId = String(message.key.id || "");
     if (!messageId) return null;
     const createdAt = timestampOf(message);
-    const chatKey = "waweb:" + jid;
+    const chatKey = accountId ? `waweb:${accountId}:${jid}` : "waweb:" + jid;
 
     let translation = null;
     if (translate?.configured?.() && content.type === "text") {
@@ -443,14 +452,17 @@ function createWhatsAppWebService({
         const now = nowIso();
         db.prepare(
           `INSERT INTO conversations
-             (telegram_chat_id, channel, chat_type, title, username, status, assignee_id,
-              last_message_at, last_message_preview, last_message_direction,
+             (telegram_chat_id, channel, account_id, chat_type, title, username, status,
+              assignee_id, assigned_at, last_message_at, last_message_preview, last_message_direction,
               unread_count, created_at, updated_at)
-           VALUES (?, ?, 'private', ?, NULL, 'open', NULL, ?, ?, 'in', 0, ?, ?)`
+           VALUES (?, ?, ?, 'private', ?, NULL, 'open', ?, ?, ?, ?, 'in', 0, ?, ?)`
         ).run(
           chatKey,
           CHANNEL,
+          accountId,
           title,
+          ownerId,
+          ownerId ? now : null,
           createdAt,
           messagePreview(content.body),
           now,
@@ -459,7 +471,7 @@ function createWhatsAppWebService({
         conversation = db.prepare(
           "SELECT * FROM conversations WHERE telegram_chat_id = ?"
         ).get(chatKey);
-        autoAssignConversation(db, conversation.id, config);
+        if (!accountId) autoAssignConversation(db, conversation.id, config);
         created = true;
       } else {
         db.prepare(
@@ -552,7 +564,8 @@ function createWhatsAppWebService({
       );
     }
 
-    const jid = String(conversation.telegram_chat_id || "").replace(/^waweb:/, "");
+    const rawChatId = String(conversation.telegram_chat_id || "");
+    const jid = (accountId ? rawChatId.replace(`waweb:${accountId}:`, "") : rawChatId.replace(/^waweb:/, ""));
     if (!isPrivateJid(jid)) {
       throw new WhatsAppWebError("暂不支持向该 WhatsApp 会话发送消息", "INVALID_INPUT");
     }
@@ -615,6 +628,8 @@ function createWhatsAppWebService({
   function status() {
     return {
       enabled,
+      accountId,
+      ownerId,
       configured: running || configuredNow(),
       running,
       loginInProgress,

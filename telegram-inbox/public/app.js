@@ -110,6 +110,8 @@ const state = {
   messages: [],
   hasMore: false,
   filters: { scope: "all", status: "open", q: "" },
+  mode: "shared",
+  personal: { enabled: false, channels: [], accounts: [], timer: null, loading: false },
   cannedReplies: [],
   editingCannedId: null,
   customerTags: [],
@@ -235,6 +237,7 @@ async function boot() {
     state.telegramConfigured = Boolean(health.telegramConfigured);
     state.whatsappConfigured = Boolean(health.whatsappConfigured);
     state.whatsappWebConfigured = Boolean(health.whatsappWebConfigured && health.whatsappWebRunning);
+    state.personal.enabled = Boolean(health.personalAccountsEnabled);
     const data = await api("/api/auth/me");
     state.me = data.user;
     await enterInbox();
@@ -255,6 +258,7 @@ async function enterInbox() {
   await loadTranslateConfig();
   await loadAiPreferences();
   await loadConversations();
+  await loadPersonalAccounts({ silent: true });
   await loadSidebarStats();
   connectRealtime();
   startFallbackPolling();
@@ -293,9 +297,232 @@ function showInbox() {
   $("#currentUser").textContent = `${state.me.displayName} · ${roleLabel(state.me.role)}`;
   $("#channelsBtn").hidden = state.me.role !== "admin";
   $("#teamBtn").hidden = state.me.role !== "admin";
+  $("#personalAccountsBtn").hidden = state.me.role === "viewer" || !state.personal.enabled;
+  $("#modeSwitch").hidden = state.me.role === "viewer" || !state.personal.enabled;
   $("#aiBtn").hidden = state.me.role === "viewer";
+  applyModeUi();
   applyRoleScope();
   renderTelegramState();
+}
+
+function escapeHtml(value) {
+  return String(value ?? "").replace(/[&<>"']/g, ch => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
+  }[ch]));
+}
+
+function applyModeUi() {
+  for (const tab of $$(".mode-tab")) {
+    tab.classList.toggle("active", tab.dataset.mode === state.mode);
+  }
+  const personal = state.mode === "personal";
+  $("#personalAccountsBtn").textContent = personal ? "我的个人号" : "个人号";
+  document.body.classList.toggle("personal-mode", personal);
+}
+
+function stopPersonalPolling() {
+  if (state.personal.timer) clearInterval(state.personal.timer);
+  state.personal.timer = null;
+}
+
+function startPersonalPolling() {
+  stopPersonalPolling();
+  state.personal.timer = setInterval(() => {
+    if ($("#personalModal").hidden) {
+      stopPersonalPolling();
+      return;
+    }
+    loadPersonalAccounts({ silent: true });
+  }, 2500);
+}
+
+function setPersonalError(message) {
+  const error = $("#personalError");
+  error.textContent = message || "";
+  error.hidden = !message;
+}
+
+async function loadPersonalAccounts(options = {}) {
+  if (!state.me || state.me.role === "viewer") return;
+  if (state.personal.loading) return;
+  state.personal.loading = true;
+  try {
+    const data = await api("/api/accounts");
+    state.personal.enabled = Boolean(data.enabled);
+    state.personal.channels = Array.isArray(data.channels) ? data.channels : [];
+    state.personal.accounts = Array.isArray(data.accounts) ? data.accounts : [];
+    renderPersonalAccounts();
+    if (state.active) {
+      renderTelegramState();
+    }
+  } catch (error) {
+    if (!options.silent && error.status !== 401) setPersonalError(error.message);
+  } finally {
+    state.personal.loading = false;
+  }
+}
+
+function personalStatusText(channel, account) {
+  if (!channel.available) return "未启用";
+  if (!account) return "未绑定";
+  const status = account.status || {};
+  if (status.passwordRequired) return "需要两步验证密码";
+  if (status.running) {
+    const name = status.me?.name ||
+      [status.me?.firstName, status.me?.lastName].filter(Boolean).join(" ") ||
+      status.me?.username ||
+      account.displayName ||
+      "";
+    return name ? `已连接 ${name}` : "已连接";
+  }
+  if (status.loginInProgress) return status.qr ? "等待扫码" : "正在生成二维码…";
+  if (status.error) return status.error;
+  return "未登录";
+}
+
+function renderPersonalAccounts() {
+  const wrap = $("#personalAccountsList");
+  if (!wrap) return;
+  if (wrap.contains(document.activeElement) && document.activeElement?.tagName === "INPUT") return;
+  const enabled = state.personal.enabled;
+  $("#personalModeNote").textContent = enabled
+    ? "个人号消息只进入你自己的收件箱；管理员可以在「共用收件箱」和「个人号模式」之间切换查看。"
+    : "服务器未启用个人号模式（PERSONAL_ACCOUNTS_ENABLED=false）。";
+
+  if (!state.personal.channels.length) {
+    wrap.innerHTML = '<p class="channel-note">个人号服务未启动。</p>';
+    return;
+  }
+
+  const cards = state.personal.channels.map(channel => {
+    const account = state.personal.accounts.find(item => item.channel === channel.channel);
+    const status = account?.status || {};
+    const available = Boolean(channel.available) && enabled;
+    const connected = Boolean(status.running);
+    const qr = status.qr
+      ? `<div class="qr-wrap"><img src="${escapeHtml(status.qr)}" alt="${escapeHtml(channel.label)} 登录二维码" width="320" height="320"><p>用手机 ${escapeHtml(channel.label)} 扫描二维码完成登录。</p></div>`
+      : "";
+    const password = status.passwordRequired
+      ? `<form class="channel-form personal-password" data-password-form="${account.id}">
+           <label>两步验证密码${status.passwordHint ? `（提示：${escapeHtml(status.passwordHint)}）` : ""}
+             <input type="password" name="password" autocomplete="current-password" required>
+           </label>
+           <div class="channel-actions"><button class="primary" type="submit">提交密码</button></div>
+         </form>`
+      : "";
+    const actions = [];
+    if (available) {
+      if (!account) {
+        actions.push(`<button class="primary" type="button" data-personal-action="bind" data-channel="${channel.channel}">绑定并扫码</button>`);
+      } else if (!connected) {
+        actions.push(`<button class="primary" type="button" data-personal-action="login" data-id="${account.id}">${status.loginInProgress ? "刷新二维码" : "扫码登录"}</button>`);
+      }
+      if (account) {
+        actions.push(`<button class="ghost" type="button" data-personal-action="logout" data-id="${account.id}">退出登录</button>`);
+      }
+    }
+    return `<section class="personal-card">
+      <div class="personal-card-head">
+        <div>
+          <strong>${escapeHtml(channel.label)} 个人号</strong>
+          <span class="personal-status ${connected ? "on" : ""}">${escapeHtml(personalStatusText(channel, account))}</span>
+        </div>
+        <span class="channel-dot ${connected ? "on" : "off"}" aria-hidden="true"></span>
+      </div>
+      ${account ? `<p class="channel-note">账号：${escapeHtml(account.label || "我的个人号")}${account.displayName ? ` · ${escapeHtml(account.displayName)}` : ""}</p>` : ""}
+      ${!channel.available ? `<p class="channel-note">${escapeHtml(channel.hint || "")}</p>` : ""}
+      ${qr}
+      ${password}
+      <div class="channel-actions">${actions.join("")}</div>
+      ${status.error && !status.running ? `<div class="form-error">${escapeHtml(status.error)}</div>` : ""}
+    </section>`;
+  });
+
+  const html = cards.join("");
+  if (wrap._renderedHtml === html) return;
+  wrap.innerHTML = html;
+  wrap._renderedHtml = html;
+}
+
+async function openPersonalModal() {
+  setPersonalError("");
+  $("#personalModal").hidden = false;
+  await loadPersonalAccounts();
+  startPersonalPolling();
+}
+
+async function personalBind(channel) {
+  setPersonalError("");
+  try {
+    const data = await api("/api/accounts", {
+      method: "POST",
+      body: { channel, label: `${state.me.displayName} 的${channel === "whatsapp_web" ? "WhatsApp" : "Telegram"}` }
+    });
+    await api(`/api/accounts/${data.account.id}/login`, { method: "POST" });
+    await loadPersonalAccounts();
+    startPersonalPolling();
+  } catch (error) {
+    setPersonalError(error.message);
+  }
+}
+
+async function personalLogin(id) {
+  setPersonalError("");
+  try {
+    await api(`/api/accounts/${id}/login`, { method: "POST" });
+    await loadPersonalAccounts();
+    startPersonalPolling();
+  } catch (error) {
+    setPersonalError(error.message);
+  }
+}
+
+async function personalLogout(id) {
+  setPersonalError("");
+  try {
+    await api(`/api/accounts/${id}/logout`, { method: "POST" });
+    await loadPersonalAccounts();
+    if (state.mode === "personal") await loadConversations();
+  } catch (error) {
+    setPersonalError(error.message);
+  }
+}
+
+async function personalPassword(id, password) {
+  setPersonalError("");
+  try {
+    await api(`/api/accounts/${id}/password`, {
+      method: "POST",
+      body: { password }
+    });
+    await loadPersonalAccounts();
+    startPersonalPolling();
+  } catch (error) {
+    setPersonalError(error.message);
+  }
+}
+
+async function switchMode(mode) {
+  if (mode !== "shared" && mode !== "personal") return;
+  if (state.mode === mode) return;
+  if (mode === "personal" && !state.personal.enabled) {
+    showToast("服务器未启用个人号模式", "error");
+    return;
+  }
+  state.mode = mode;
+  state.activeId = null;
+  state.active = null;
+  state.messages = [];
+  document.body.classList.remove("mobile-chat-open");
+  applyModeUi();
+  renderChatHeader();
+  renderMessages();
+  await loadConversations();
+  await loadPersonalAccounts({ silent: true });
+  if (mode === "personal") {
+    const hasAccounts = state.personal.accounts.length > 0;
+    if (!hasAccounts) showToast("还没有绑定个人号，点击「我的个人号」扫码绑定", "error");
+  }
 }
 
 async function logout() {
@@ -324,6 +551,9 @@ function showLogin() {
   $("#viewerView").hidden = true;
   $("#loginView").hidden = false;
   $("#channelsModal").hidden = true;
+  $("#personalModal").hidden = true;
+  stopPersonalPolling();
+  state.mode = "shared";
   $("#teamModal").hidden = true;
   $("#passwordModal").hidden = true;
   $("#cannedModal").hidden = true;
@@ -390,6 +620,7 @@ async function loadConversations(options = {}) {
   const params = new URLSearchParams({
     scope: state.filters.scope,
     status: state.filters.status,
+    mode: state.mode,
     limit: "50"
   });
   if (state.filters.q) params.set("q", state.filters.q);
@@ -432,11 +663,14 @@ function renderCounts() {
 
   const total = state.counts.all ?? 0;
   const open = state.counts.open ?? 0;
+  const modeLabel = state.mode === "personal" ? "个人号" : "共用";
   $("#inboxSubtitle").textContent = total
     ? (state.me.role === "admin"
-      ? `${total} 个会话 · ${open} 个待处理`
-      : `${total} 个分配给我的会话 · ${open} 个待处理`)
-    : (state.me.role === "admin" ? "Telegram 私聊与群聊" : "暂无分配给我的会话");
+      ? `${modeLabel} · ${total} 个会话 · ${open} 个待处理`
+      : `${modeLabel} · ${total} 个分配给我的会话 · ${open} 个待处理`)
+    : (state.mode === "personal"
+      ? "还没有个人号会话，扫码绑定后客户消息会出现在这里"
+      : (state.me.role === "admin" ? "Telegram 私聊与群聊" : "暂无分配给我的会话"));
 }
 
 function conversationTime(iso) {
@@ -462,11 +696,13 @@ function renderConversationList() {
     $("#listEmpty").hidden = false;
     $("#listEmptyText").textContent = state.filters.q
       ? "没有找到匹配的会话，试试其他关键词。"
-      : state.me.role === "agent"
-        ? "管理员分配会话后，会显示在这里。"
-        : (state.telegramConfigured || state.whatsappConfigured || state.whatsappWebConfigured)
-          ? "在 Telegram 或 WhatsApp 里给客户发一条消息，就会出现在这里。"
-          : "配置 TELEGRAM_BOT_TOKEN 或 WHATSAPP_*，或在「渠道」中扫码登录 WhatsApp 个人号，消息会出现在这里。";
+      : state.mode === "personal"
+        ? "还没有个人号会话。点击「个人号」绑定自己的 WhatsApp 或 Telegram，客户消息会出现在这里。"
+        : state.me.role === "agent"
+          ? "管理员分配会话后，会显示在这里。"
+          : (state.telegramConfigured || state.whatsappConfigured || state.whatsappWebConfigured)
+            ? "在 Telegram 或 WhatsApp 里给客户发一条消息，就会出现在这里。"
+            : "配置 TELEGRAM_BOT_TOKEN 或 WHATSAPP_*，或在「渠道」中扫码登录 WhatsApp 个人号，消息会出现在这里。";
     updateDocumentTitle();
     return;
   }
@@ -506,11 +742,22 @@ function renderConversationList() {
     meta.className = "conversation-meta";
     const channel = document.createElement("span");
     channel.className = "channel-chip " + (conversation.channel || "telegram");
-    channel.textContent = conversation.channel === "whatsapp"
-      ? "WA"
-      : conversation.channel === "whatsapp_web" ? "WAW" : "TG";
-    channel.title = channelLabel(conversation.channel);
+    channel.textContent = conversation.accountId
+      ? (conversation.channel === "whatsapp_web" ? "WA·个人" : "TG·个人")
+      : conversation.channel === "whatsapp"
+        ? "WA"
+        : conversation.channel === "whatsapp_web" ? "WAW" : "TG";
+    channel.title = conversation.accountId
+      ? `${channelLabel(conversation.channel)} · ${conversation.accountLabel || conversation.accountName || "个人号"}`
+      : channelLabel(conversation.channel);
     meta.appendChild(channel);
+    if (conversation.accountId && state.me.role === "admin" && conversation.accountOwnerName) {
+      const owner = document.createElement("span");
+      owner.className = "assignee-chip";
+      owner.textContent = conversation.accountOwnerName;
+      owner.title = "个人号所属员工";
+      meta.appendChild(owner);
+    }
     if (conversation.assigneeName) {
       const assignee = document.createElement("span");
       assignee.className = "assignee-chip";
@@ -888,9 +1135,13 @@ function renderChatHeader() {
 
   $("#chatTitle").textContent = conversation.title || "未命名会话";
   const typeLabel = conversation.chatType === "private" ? "私聊" : "群聊";
-  const displayId = String(conversation.chatId || "").replace(/^wa:/, "");
+  const displayId = String(conversation.chatId || "")
+    .replace(/^wa:/, "")
+    .replace(/^waweb:\d+:/, "")
+    .replace(/^mtproto:\d+:/, "");
   $("#chatSubtitle").textContent =
-    channelLabel(conversation.channel) + " · " +
+    channelLabel(conversation.channel) +
+    (conversation.accountId ? ` · ${conversation.accountLabel || conversation.accountName || "个人号"}` : "") + " · " +
     (conversation.username ? "@" + conversation.username + " · " : "") +
     typeLabel + " · ID " + displayId;
 
@@ -1024,10 +1275,15 @@ function renderAssigneeOptions(conversation) {
 function channelLabel(channel) {
   if (channel === "whatsapp") return "WhatsApp";
   if (channel === "whatsapp_web") return "WhatsApp 个人号";
+  if (channel === "telegram_user") return "Telegram 个人号";
   return "Telegram";
 }
 
 function activeChannelConfigured() {
+  if (state.active?.accountId) {
+    const account = state.personal.accounts.find(item => item.id === state.active.accountId);
+    return Boolean(account?.status?.running);
+  }
   const channel = state.active?.channel || "telegram";
   if (channel === "whatsapp") return state.whatsappConfigured;
   if (channel === "whatsapp_web") return state.whatsappWebConfigured;
@@ -1040,11 +1296,15 @@ function renderTelegramState() {
   const label = channelLabel(channel);
   $("#telegramWarning").hidden = configured;
   $("#setupHint").hidden = configured;
-  $("#telegramWarning").textContent = channel === "whatsapp"
-    ? "未配置 WhatsApp 凭据，当前只能查看本地数据，无法发送回复。请让管理员在「渠道」中配置。"
-    : channel === "whatsapp_web"
-      ? "WhatsApp 个人号未登录或连接已断开，当前只能查看本地数据，无法发送回复。请让管理员在「渠道」中扫码。"
-      : "未配置 Telegram Bot Token，当前只能查看本地数据，无法发送回复。请让管理员在「渠道」中配置。";
+  $("#telegramWarning").textContent = state.active?.accountId
+    ? "该个人号未登录或连接已断开，当前只能查看本地数据。请到「个人号」中重新扫码。"
+    : channel === "whatsapp"
+      ? "未配置 WhatsApp 凭据，当前只能查看本地数据，无法发送回复。请让管理员在「渠道」中配置。"
+      : channel === "whatsapp_web"
+        ? "WhatsApp 个人号未登录或连接已断开，当前只能查看本地数据，无法发送回复。请让管理员在「渠道」中扫码。"
+        : channel === "telegram_user"
+          ? "Telegram 个人号未登录或连接已断开，当前只能查看本地数据。请到「个人号」中重新扫码。"
+          : "未配置 Telegram Bot Token，当前只能查看本地数据，无法发送回复。请让管理员在「渠道」中配置。";
 
   const input = $("#messageInput");
   const send = $("#sendBtn");
@@ -1170,6 +1430,22 @@ function stopFallbackPolling() {
 
 function handleRealtime(event) {
   if (!event || !event.type) return;
+
+  if (event.conversation) {
+    const eventMode = event.conversation.accountId ? "personal" : "shared";
+    if (eventMode !== state.mode) {
+      if (state.activeId === event.conversation.id) {
+        state.threadToken += 1;
+        state.activeId = null;
+        state.active = null;
+        state.messages = [];
+        renderChatHeader();
+        renderMessages();
+      }
+      scheduleRefresh();
+      return;
+    }
+  }
 
   if (event.type === "conversation.removed") {
     state.conversations = state.conversations.filter(item => item.id !== event.conversationId);
@@ -1315,7 +1591,9 @@ async function sendMessage() {
   if (!text) return;
   const channel = state.active.channel || "telegram";
   if (!activeChannelConfigured()) {
-    showToast(`未配置 ${channelLabel(channel)} 凭据，无法发送`, "error");
+    showToast(state.active.accountId
+      ? "该个人号未登录，请到「我的个人号」中扫码"
+      : `未配置 ${channelLabel(channel)} 凭据，无法发送`, "error");
     return;
   }
 
@@ -2981,6 +3259,41 @@ function bindEvents() {
     $("#passwordModal").hidden = false;
     $("#passwordError").hidden = true;
     $("#passwordForm").reset();
+  });
+
+  $$(".mode-tab").forEach(tab => {
+    tab.addEventListener("click", () => switchMode(tab.dataset.mode));
+  });
+
+  $("#personalAccountsBtn").addEventListener("click", openPersonalModal);
+  $("#personalClose").addEventListener("click", () => {
+    $("#personalModal").hidden = true;
+    stopPersonalPolling();
+  });
+  $("#personalModal").addEventListener("click", event => {
+    if (event.target === $("#personalModal")) {
+      $("#personalModal").hidden = true;
+      stopPersonalPolling();
+    }
+  });
+  $("#personalAccountsList").addEventListener("click", event => {
+    const button = event.target.closest("[data-personal-action]");
+    if (!button) return;
+    const action = button.dataset.personalAction;
+    if (action === "bind") {
+      personalBind(button.dataset.channel);
+    } else if (action === "login") {
+      personalLogin(Number(button.dataset.id));
+    } else if (action === "logout") {
+      personalLogout(Number(button.dataset.id));
+    }
+  });
+  $("#personalAccountsList").addEventListener("submit", event => {
+    const form = event.target.closest("[data-password-form]");
+    if (!form) return;
+    event.preventDefault();
+    const password = form.querySelector('input[name="password"]')?.value || "";
+    personalPassword(Number(form.dataset.passwordForm), password);
   });
 
   $("#refreshBtn").addEventListener("click", async () => {

@@ -42,6 +42,14 @@ const config = {
   whatsappWebSessionPath: path.resolve(
     process.env.WHATSAPP_WEB_SESSION_PATH || path.join(dataDir, "whatsapp-web")
   ),
+  personalAccountsEnabled: readBool("PERSONAL_ACCOUNTS_ENABLED", true),
+  accountsDir: path.resolve(process.env.ACCOUNTS_DIR || path.join(dataDir, "accounts")),
+  telegramUserEnabled: readBool("TELEGRAM_USER_ENABLED", false),
+  telegramUserApiId: readInt("TELEGRAM_USER_API_ID", 0),
+  telegramUserApiHash: (process.env.TELEGRAM_USER_API_HASH || "").trim(),
+  telegramUserSessionPath: path.resolve(
+    process.env.TELEGRAM_USER_SESSION_PATH || path.join(dataDir, "telegram-user")
+  ),
   googleTranslateApiKey: (process.env.GOOGLE_TRANSLATE_API_KEY || "").trim(),
   googleTranslateApiBase: (process.env.GOOGLE_TRANSLATE_API_BASE || "https://translation.googleapis.com").replace(/\/+$/, ""),
   googleTranslateWebApiBase: (process.env.GOOGLE_TRANSLATE_WEB_API_BASE || "https://translate.googleapis.com").replace(/\/+$/, ""),

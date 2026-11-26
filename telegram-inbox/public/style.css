@@ -267,6 +267,69 @@ textarea {
 .connection.online i { background: var(--green); box-shadow: 0 0 0 3px rgba(18, 161, 80, .16); }
 .connection.offline i { background: var(--amber); box-shadow: 0 0 0 3px rgba(217, 119, 6, .16); }
 
+.mode-switch {
+  display: inline-flex;
+  padding: 3px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--soft);
+}
+
+.mode-tab {
+  border: 0;
+  border-radius: 999px;
+  padding: 6px 11px;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: 11px;
+  font-weight: 700;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.mode-tab.active {
+  background: var(--accent);
+  color: #fff;
+  box-shadow: 0 4px 12px rgba(255, 138, 61, .24);
+}
+
+.personal-accounts {
+  display: grid;
+  gap: 12px;
+}
+
+.personal-card {
+  display: grid;
+  gap: 10px;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--soft);
+}
+
+.personal-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.personal-card-head > div {
+  display: grid;
+  gap: 3px;
+}
+
+.personal-card-head strong { font-size: 13px; }
+.personal-status { color: var(--muted); font-size: 11px; }
+.personal-status.on { color: var(--green); font-weight: 700; }
+
+.personal-password {
+  margin-top: 0;
+  padding-top: 10px;
+  border-top: 1px dashed var(--line);
+}
+
 .shell {
   flex: 1 1 auto;
   min-height: 0;

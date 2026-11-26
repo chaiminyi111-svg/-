@@ -47,8 +47,13 @@
         </div>
       </div>
       <div class="topbar-right">
+        <div id="modeSwitch" class="mode-switch" role="tablist" aria-label="工作模式">
+          <button class="mode-tab active" type="button" data-mode="shared">共用收件箱</button>
+          <button class="mode-tab" type="button" data-mode="personal">个人号模式</button>
+        </div>
         <span id="connectionStatus" class="connection"><i></i><span>连接中</span></span>
         <span id="currentUser" class="current-user"></span>
+        <button id="personalAccountsBtn" class="ghost" type="button" hidden>个人号</button>
         <button id="appearanceBtn" class="ghost" type="button" title="切换界面风格">外观</button>
         <button id="statsBtn" class="ghost" type="button">数据</button>
         <button id="aiBtn" class="ghost" type="button" hidden>AI 助手</button>
@@ -460,6 +465,21 @@
           <div id="cannedError" class="form-error" hidden></div>
         </form>
       </div>
+    </div>
+  </div>
+
+  <div id="personalModal" class="modal" hidden>
+    <div class="modal-card channels-card" role="dialog" aria-modal="true" aria-labelledby="personalTitle">
+      <header class="modal-head">
+        <div>
+          <h3 id="personalTitle">我的个人号</h3>
+          <p>每个员工绑定自己的 WhatsApp / Telegram 个人号，一人一个账号，消息只进入自己的收件箱。</p>
+        </div>
+        <button id="personalClose" class="modal-close" type="button" aria-label="关闭">×</button>
+      </header>
+      <div id="personalModeNote" class="channel-note"></div>
+      <div id="personalAccountsList" class="personal-accounts"></div>
+      <div id="personalError" class="form-error" hidden></div>
     </div>
   </div>
 

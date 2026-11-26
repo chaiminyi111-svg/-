@@ -9,6 +9,7 @@
 - Telegram Bot 长轮询收消息，无需公网 webhook
 - WhatsApp Cloud API webhook 收消息，支持文本回复；出站消息展示已发送/已送达/已读回执
 - WhatsApp 个人号（WhatsApp Web / Baileys，实验渠道）：管理员扫码登录，收私聊文本并回复，session 保存在本地
+- 双模式收件箱：**共用收件箱（B 模式）**保留原来的多渠道共享；**个人号模式（A 模式）**让每个员工绑定自己的 WhatsApp / Telegram 个人号，一人一个账号，消息只进入本人收件箱，顶栏可随时切换两种模式
 - 消息回执：出站消息下方显示单勾（已发送）和双勾（已送达/对方已读）；Telegram Bot API 不提供已读回执，WhatsApp 支持
 - 界面风格：顶栏「外观」提供 6 套主题（夕阳橙默认、熔岩红、森林绿、夜樱粉、深海蓝、暖纸白），保存在当前浏览器
 - 统一收件箱：私聊、群聊、未读计数、已读/未读状态、手动标记未读、消息预览、渠道标识
@@ -55,6 +56,8 @@ telegram-inbox/
 │   ├── telegram.js        # Telegram Bot 长轮询、收发消息、媒体
 │   ├── whatsapp.js        # WhatsApp Cloud API webhook、文本收发
 │   ├── whatsapp-web.js    # WhatsApp 个人号（Baileys）扫码、私聊收发
+│   ├── telegram-user.js   # Telegram 个人号（MTProto）扫码、私聊收发
+│   ├── accounts.js        # 多员工个人号账号绑定、登录与消息路由
 │   ├── translate.js       # Google Cloud Translation 识别与翻译
 │   ├── ai.js              # OpenAI 兼容 AI 自动回复、建议与模式
 │   ├── assignment.js      # 新会话自动分配
@@ -64,6 +67,7 @@ telegram-inbox/
 │   └── check-telegram.js  # 校验真实 Bot Token
 ├── public/                # 中文工作台前端
 ├── test/app.test.js       # 使用 mock Telegram / WhatsApp 的端到端 API 测试
+├── test/accounts.test.js  # 个人号账号、模式过滤与发送路由测试
 ├── Dockerfile
 ├── docker-compose.yml
 └── .env.example
@@ -168,6 +172,42 @@ WhatsApp 个人号通过 Baileys 连接 WhatsApp Web，不需要 Meta 应用和�
 - 二维码只通过管理员接口返回给当前页面，不写入日志；仍请避免在公开场合投屏或截图。
 - 连接断开后会自动重连；登录失效（被手机端退出）需要重新扫码。
 - 当前未实现消息历史同步，只接收服务在线期间的新消息。
+
+## 双模式：共用收件箱（B 模式）与个人号模式（A 模式）
+
+两种模式并存，顶栏的「共用收件箱 / 个人号模式」开关可以随时切换，原有功能不受影响。
+
+- **共用收件箱（B 模式）**：Telegram Bot、WhatsApp Cloud API 和旧的 WhatsApp 个人号仍然进入同一个共享收件箱，由管理员分配给客服。
+- **个人号模式（A 模式）**：每个员工在「我的个人号」中绑定自己的 WhatsApp / Telegram 个人号。一个员工在每个渠道只能绑定一个账号；客户消息只进入该员工自己的收件箱，管理员可以在个人号模式中查看全部员工的个人号会话。
+
+启用方式：
+
+```dotenv
+PERSONAL_ACCOUNTS_ENABLED=true
+# 可选，默认 $DATA_DIR/accounts；每个账号使用独立子目录
+ACCOUNTS_DIR=
+
+# WhatsApp 个人号（复用 WHATSAPP_WEB_ENABLED）
+WHATSAPP_WEB_ENABLED=true
+
+# Telegram 个人号（MTProto）
+TELEGRAM_USER_ENABLED=true
+TELEGRAM_USER_API_ID=123456
+TELEGRAM_USER_API_HASH=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+```
+
+使用步骤：
+
+1. 员工登录后切换到「个人号模式」，点击「我的个人号」。
+2. WhatsApp：点击「绑定并扫码」，用手机 WhatsApp 扫描二维码。
+3. Telegram：先到 https://my.telegram.org 创建应用并配置 `TELEGRAM_USER_API_ID` / `TELEGRAM_USER_API_HASH`，然后在页面点击「绑定并扫码」；如果账号开启了两步验证，页面会要求输入密码。
+4. 绑定成功后客户消息会出现在「个人号模式」；在会话里回复即可通过该员工的个人号发出。
+
+注意：
+
+- 个人号 session 保存在 `ACCOUNTS_DIR/<渠道>/<员工>-<随机ID>`，等同于登录凭证；目录权限为 `700`、文件为 `600`，不要提交到 Git 或打包分享。
+- 个人号会话不能直接删除；需要先退出登录。删除账号前必须先处理已有会话，避免客户消息混入共用收件箱。
+- Telegram 个人号使用 MTProto，首次登录需要在服务器上能访问 Telegram；二维码和两步验证密码只通过当前登录会话返回。
 
 ## 配置 Telegram Bot
 
@@ -296,6 +336,12 @@ TRUST_PROXY=true
 | `WHATSAPP_API_BASE` | `https://graph.facebook.com/v20.0` | Meta Graph API 地址 |
 | `WHATSAPP_WEB_ENABLED` | `false` | 是否启用 WhatsApp 个人号（实验渠道） |
 | `WHATSAPP_WEB_SESSION_PATH` | `$DATA_DIR/whatsapp-web` | WhatsApp 个人号 session 目录，等同于登录凭证 |
+| `PERSONAL_ACCOUNTS_ENABLED` | `true` | 是否启用个人号模式（A 模式） |
+| `ACCOUNTS_DIR` | `$DATA_DIR/accounts` | 多员工个人号 session 根目录，每个账号使用独立子目录 |
+| `TELEGRAM_USER_ENABLED` | `false` | 是否启用 Telegram 个人号（MTProto 扫码） |
+| `TELEGRAM_USER_API_ID` | 空 | 在 my.telegram.org 创建应用后获得的 api_id |
+| `TELEGRAM_USER_API_HASH` | 空 | 对应的 api_hash |
+| `TELEGRAM_USER_SESSION_PATH` | `$DATA_DIR/telegram-user` | 旧版单账号 CLI 登录 session 路径 |
 | `GOOGLE_TRANSLATE_API_KEY` | 空 | Google Cloud Translation API Key；也可在「渠道」页面保存 |
 | `GOOGLE_TRANSLATE_API_BASE` | `https://translation.googleapis.com` | Google 翻译 API 地址 |
 | `TRANSLATE_PROVIDER` | `google` | `google`（官方 API，需要 Key）/ `google-web` / `google-web-main` / `google-chrome` / `mymemory`（无需 Key） |
