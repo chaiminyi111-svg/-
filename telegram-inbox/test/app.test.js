@@ -640,6 +640,7 @@ test("Telegram support inbox end-to-end API", async t => {
     assert.equal(result.response.status, 201);
     assert.equal(result.data.message.direction, "out");
     assert.equal(result.data.message.body, "您好，请稍等");
+    assert.equal(result.data.message.deliveryStatus, "sent");
     assert.equal(mock.sent.length, 1);
     assert.equal(String(mock.sent[0].chat_id), "555");
     assert.equal(mock.sent[0].text, "您好，请稍等");
@@ -665,6 +666,7 @@ test("Telegram support inbox end-to-end API", async t => {
     assert.equal(documentData.message.type, "document");
     assert.equal(documentData.message.meta.fileName, "报价单.pdf");
     assert.equal(documentData.message.body, "这是报价单");
+    assert.equal(documentData.message.deliveryStatus, "sent");
     assert.equal(mock.mediaSent[0].method, "sendDocument");
     assert.match(mock.mediaSent[0].contentType, /multipart\/form-data/);
 
@@ -681,6 +683,7 @@ test("Telegram support inbox end-to-end API", async t => {
     assert.equal(photoUpload.status, 201);
     const photoData = await photoUpload.json();
     assert.equal(photoData.message.type, "photo");
+    assert.equal(photoData.message.deliveryStatus, "sent");
     assert.equal(mock.mediaSent[1].method, "sendPhoto");
 
     const proxied = await fetch(`${base}/api/messages/${photoData.message.id}/media`, {

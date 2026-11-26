@@ -3,9 +3,10 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="color-scheme" content="light">
-  <meta name="theme-color" content="#229ED9">
+  <meta name="color-scheme" content="dark">
+  <meta name="theme-color" content="#ff8a3d">
   <title>聚合客服台 · 统一收件箱</title>
+  <script src="/theme.js"></script>
   <link rel="stylesheet" href="/style.css">
 </head>
 <body>
@@ -32,7 +33,7 @@
         <button id="loginButton" class="primary" type="submit">登录</button>
         <div id="loginError" class="form-error" hidden></div>
       </form>
-      <p class="login-foot">私有化部署 · 数据保存在你的服务器</p>
+      <p class="login-foot">私有化部署 · 数据保存在你的服务器 · <button id="loginThemeBtn" class="link-button" type="button">切换外观</button></p>
     </div>
   </section>
 
@@ -48,6 +49,7 @@
       <div class="topbar-right">
         <span id="connectionStatus" class="connection"><i></i><span>连接中</span></span>
         <span id="currentUser" class="current-user"></span>
+        <button id="appearanceBtn" class="ghost" type="button" title="切换界面风格">外观</button>
         <button id="statsBtn" class="ghost" type="button">数据</button>
         <button id="aiBtn" class="ghost" type="button" hidden>AI 助手</button>
         <button id="channelsBtn" class="ghost" type="button" hidden>渠道</button>
@@ -232,6 +234,7 @@
       </div>
       <div class="topbar-right">
         <span id="viewerUser" class="current-user"></span>
+        <button id="viewerAppearanceBtn" class="ghost" type="button" title="切换界面风格">外观</button>
         <button id="viewerRefresh" class="ghost" type="button">刷新</button>
         <button id="viewerPasswordBtn" class="ghost" type="button">修改密码</button>
         <button id="viewerLogoutBtn" class="ghost" type="button">退出</button>
@@ -469,6 +472,15 @@
         </div>
         <button id="channelsClose" class="modal-close" type="button" aria-label="关闭">×</button>
       </header>
+
+      <div class="channel-status appearance-entry">
+        <span class="channel-dot on" aria-hidden="true"></span>
+        <div>
+          <strong>界面风格</strong>
+          <span id="appearanceSummary">夕阳橙 · 落日暖橙</span>
+        </div>
+        <button class="ghost" type="button" id="channelsAppearanceBtn">选择主题</button>
+      </div>
 
       <div class="channel-status" id="channelStatus">
         <span class="channel-dot" id="channelDot" aria-hidden="true"></span>
@@ -760,6 +772,20 @@
         </div>
         <div id="aiPrefsError" class="form-error" hidden></div>
       </form>
+    </div>
+  </div>
+
+  <div id="appearanceModal" class="modal" hidden>
+    <div class="modal-card appearance-card" role="dialog" aria-modal="true" aria-labelledby="appearanceTitle">
+      <header class="modal-head">
+        <div>
+          <h3 id="appearanceTitle">界面风格</h3>
+          <p>选一个喜欢的配色。设置只保存在当前浏览器。</p>
+        </div>
+        <button id="appearanceClose" class="modal-close" type="button" aria-label="关闭">×</button>
+      </header>
+      <div id="themeGrid" class="theme-grid"></div>
+      <p class="channel-note">夕阳橙是默认主题；如果觉得左侧和右侧反差太大，可以试试暖纸白或深海蓝。</p>
     </div>
   </div>
 

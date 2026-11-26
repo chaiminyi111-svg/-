@@ -8,6 +8,8 @@
 
 - Telegram Bot 长轮询收消息，无需公网 webhook
 - WhatsApp Cloud API webhook 收消息，支持文本回复；出站消息展示已发送/已送达/已读回执
+- 消息回执：出站消息下方显示单勾（已发送）和双勾（已送达/对方已读）；Telegram Bot API 不提供已读回执，WhatsApp 支持
+- 界面风格：顶栏「外观」提供 6 套主题（夕阳橙默认、熔岩红、森林绿、夜樱粉、深海蓝、暖纸白），保存在当前浏览器
 - 统一收件箱：私聊、群聊、未读计数、已读/未读状态、手动标记未读、消息预览、渠道标识
 - 翻译服务：自动识别客户语言，外文消息自动翻译为中文；回复时可选择「跟随客户语言」或指定其他语言。支持官方 Cloud Translation API，以及 4 个无需 Key 的备用通道：Google 网页翻译（`translate.googleapis.com` / `translate.google.com`）、Google Chrome 翻译接口、MyMemory，可在「渠道」中随时切换
 - AI 自动回复：管理员在「渠道」接入任意 OpenAI 兼容接口（OpenAI、DeepSeek、通义千问、智谱等），也可选择 Pollinations 免费接口或本地 Ollama，这两种方式无需 API Key；可设置模型、系统提示词、工作时间和默认模式；支持「只生成建议 / 自动回复 / 仅首次接待 / 非工作时间」四种模式。管理员在「团队」中按员工授权，员工可在「AI 助手」中单独开关并选择模式

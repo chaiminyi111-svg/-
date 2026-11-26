@@ -513,8 +513,8 @@ function createTelegramService({ db, config, logger, broadcaster, translate, hoo
       const insert = db.prepare(
         `INSERT INTO messages
            (conversation_id, telegram_message_id, direction, sender_id, sender_name,
-            body, message_type, meta_json, language, created_at)
-         VALUES (?, ?, 'out', ?, ?, ?, 'text', ?, ?, ?)`
+            body, message_type, meta_json, language, delivery_status, delivery_updated_at, created_at)
+         VALUES (?, ?, 'out', ?, ?, ?, 'text', ?, ?, 'sent', ?, ?)`
       ).run(
         conversation.id,
         String(sent.message_id),
@@ -523,6 +523,7 @@ function createTelegramService({ db, config, logger, broadcaster, translate, hoo
         outboundText,
         JSON.stringify({ via: options.via || "bot", ...(options.meta || {}), ...prepared.meta }),
         prepared.language || null,
+        now,
         createdAt
       );
 
@@ -581,8 +582,8 @@ function createTelegramService({ db, config, logger, broadcaster, translate, hoo
       const insert = db.prepare(
         `INSERT INTO messages
            (conversation_id, telegram_message_id, direction, sender_id, sender_name,
-            body, message_type, meta_json, created_at)
-         VALUES (?, ?, 'out', ?, ?, ?, ?, ?, ?)`
+            body, message_type, meta_json, delivery_status, delivery_updated_at, created_at)
+         VALUES (?, ?, 'out', ?, ?, ?, ?, ?, 'sent', ?, ?)`
       ).run(
         conversation.id,
         String(sent.message_id),
@@ -591,6 +592,7 @@ function createTelegramService({ db, config, logger, broadcaster, translate, hoo
         body,
         messageType,
         JSON.stringify(meta),
+        now,
         createdAt
       );
 

@@ -10,6 +10,15 @@ const FALLBACK_LANGUAGES = [
 ];
 const LANGUAGE_LABELS = Object.fromEntries(FALLBACK_LANGUAGES);
 
+const THEMES = [
+  { id: "sunset", name: "夕阳橙", desc: "落日暖橙 · 默认", colors: ["#ff9a4d", "#ef6a3d", "#2a1720"] },
+  { id: "ember", name: "熔岩红", desc: "炭火与赤铜", colors: ["#ff6a45", "#c52f32", "#241012"] },
+  { id: "forest", name: "森林绿", desc: "深林与薄荷", colors: ["#65d6a0", "#25845c", "#0e1d16"] },
+  { id: "sakura", name: "夜樱粉", desc: "夜色与樱花", colors: ["#ff9fc4", "#c24b7d", "#21121c"] },
+  { id: "ocean", name: "深海蓝", desc: "冷冽科技蓝", colors: ["#32d3ee", "#0b7fbe", "#071523"] },
+  { id: "paper", name: "暖纸白", desc: "奶油纸张 · 明亮", colors: ["#f4b277", "#d96a2b", "#fff7ee"] }
+];
+
 const AI_MODE_LABELS = {
   off: "关闭",
   suggest: "只生成建议",
@@ -26,6 +35,68 @@ function languageName(code) {
   if (!code) return "";
   const normalized = String(code).replace("_", "-");
   return LANGUAGE_LABELS[normalized] || LANGUAGE_LABELS[normalized.split("-")[0]] || normalized;
+}
+
+function currentTheme() {
+  return document.documentElement.dataset.theme || "sunset";
+}
+
+function applyTheme(themeId, { persist = true } = {}) {
+  const theme = THEMES.find(item => item.id === themeId) || THEMES[0];
+  document.documentElement.dataset.theme = theme.id;
+  if (persist) {
+    try { localStorage.setItem("cs-theme", theme.id); } catch {}
+  }
+  const meta = document.querySelector('meta[name="theme-color"]');
+  if (meta) meta.content = theme.colors[0];
+  const scheme = document.querySelector('meta[name="color-scheme"]');
+  if (scheme) scheme.content = theme.id === "paper" ? "light" : "dark";
+  renderThemeGrid();
+}
+
+function renderThemeGrid() {
+  const grid = $("#themeGrid");
+  if (!grid) return;
+  const active = currentTheme();
+  const activeTheme = THEMES.find(item => item.id === active) || THEMES[0];
+  const summary = $("#appearanceSummary");
+  if (summary) summary.textContent = `${activeTheme.name} · ${activeTheme.desc}`;
+  grid.replaceChildren();
+  for (const theme of THEMES) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "theme-option" + (theme.id === active ? " active" : "");
+    button.dataset.theme = theme.id;
+    button.setAttribute("aria-pressed", String(theme.id === active));
+
+    const swatch = document.createElement("span");
+    swatch.className = "theme-swatch";
+    swatch.style.background = `linear-gradient(135deg, ${theme.colors.join(", ")})`;
+
+    const copy = document.createElement("span");
+    copy.className = "theme-copy";
+    const name = document.createElement("strong");
+    name.textContent = theme.name;
+    const desc = document.createElement("small");
+    desc.textContent = theme.desc;
+    copy.append(name, desc);
+
+    const check = document.createElement("span");
+    check.className = "theme-check";
+    check.textContent = theme.id === active ? "✓" : "";
+
+    button.append(swatch, copy, check);
+    button.addEventListener("click", () => {
+      applyTheme(theme.id);
+      showToast(`已切换为${theme.name}`, "success");
+    });
+    grid.appendChild(button);
+  }
+}
+
+function openAppearanceModal() {
+  renderThemeGrid();
+  $("#appearanceModal").hidden = false;
 }
 
 const state = {
@@ -662,10 +733,13 @@ function buildMessageRow(message) {
   const time = document.createElement("div");
   time.className = "message-time";
   time.textContent = messageTime(message.createdAt);
-  if (out && message.deliveryStatus) {
+  if (out) {
+    const status = message.deliveryStatus || "sent";
     const delivery = document.createElement("span");
-    delivery.className = "delivery-status " + message.deliveryStatus;
-    delivery.textContent = deliveryStatusLabel(message.deliveryStatus);
+    delivery.className = "delivery-status " + status;
+    delivery.textContent = deliveryStatusIcon(status);
+    delivery.title = deliveryStatusLabel(status);
+    delivery.setAttribute("aria-label", deliveryStatusLabel(status));
     time.appendChild(delivery);
   }
 
@@ -2710,7 +2784,11 @@ function statusLabel(status) {
 }
 
 function deliveryStatusLabel(status) {
-  return { sent: "已发送", delivered: "已送达", read: "已读", failed: "发送失败" }[status] || "";
+  return { sent: "已发送", delivered: "已送达", read: "对方已读", failed: "发送失败" }[status] || "";
+}
+
+function deliveryStatusIcon(status) {
+  return { sent: "✓", delivered: "✓✓", read: "✓✓", failed: "!" }[status] || "✓";
 }
 
 function updateCharCount() {
@@ -2865,6 +2943,18 @@ function bindEvents() {
   });
   $("#statsRange").addEventListener("change", loadStats);
 
+  $("#appearanceBtn").addEventListener("click", openAppearanceModal);
+  $("#viewerAppearanceBtn").addEventListener("click", openAppearanceModal);
+  $("#loginThemeBtn").addEventListener("click", openAppearanceModal);
+  $("#channelsAppearanceBtn").addEventListener("click", () => {
+    $("#channelsModal").hidden = true;
+    openAppearanceModal();
+  });
+  $("#appearanceClose").addEventListener("click", () => { $("#appearanceModal").hidden = true; });
+  $("#appearanceModal").addEventListener("click", event => {
+    if (event.target === $("#appearanceModal")) $("#appearanceModal").hidden = true;
+  });
+
   $("#channelsBtn").addEventListener("click", openChannelsModal);
   $("#channelsClose").addEventListener("click", () => { $("#channelsModal").hidden = true; });
   $("#channelsModal").addEventListener("click", event => {
@@ -2990,6 +3080,13 @@ function bindEvents() {
       $("#passwordModal").hidden = true;
       $("#cannedModal").hidden = true;
       $("#statsModal").hidden = true;
+      $("#appearanceModal").hidden = true;
+    }
+  });
+
+  window.addEventListener("storage", event => {
+    if (event.key === "cs-theme" && event.newValue) {
+      applyTheme(event.newValue, { persist: false });
     }
   });
 
@@ -3005,6 +3102,7 @@ function bindEvents() {
 }
 
 function init() {
+  applyTheme(currentTheme(), { persist: false });
   bindEvents();
   boot();
 }
