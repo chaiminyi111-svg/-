@@ -282,6 +282,26 @@ function createAccountsService({ db, config, logger, broadcaster, translate, hoo
     return service.sendReply(conversation, text, user, options);
   }
 
+  async function deleteMessage(conversation, message) {
+    const row = conversation?.account_id ? rowById(conversation.account_id) : null;
+    if (!row) throw new AccountError("个人号账号不存在", "NOT_CONFIGURED");
+    const service = serviceFor(row);
+    if (typeof service.deleteMessage !== "function") {
+      throw new AccountError("当前个人号渠道不支持撤回消息", "NOT_SUPPORTED");
+    }
+    return service.deleteMessage(conversation, message);
+  }
+
+  async function reconnect(user, id) {
+    const row = rowById(id);
+    if (!canManage(user, row)) throw new AccountError("账号不存在", "NOT_FOUND");
+    if (!channelAvailable(row.channel)) throw new AccountError(channelHint(row.channel), "NOT_CONFIGURED");
+    const service = serviceFor(row);
+    await service.stop();
+    await service.start();
+    return serialize(rowById(id));
+  }
+
   async function stopAll() {
     const list = [...services.values()];
     services.clear();
@@ -302,7 +322,9 @@ function createAccountsService({ db, config, logger, broadcaster, translate, hoo
     submitPassword,
     logout,
     remove,
+    reconnect,
     sendReply,
+    deleteMessage,
     stopAll
   };
 }

@@ -494,6 +494,13 @@ function createWhatsAppService({ db, config, logger, broadcaster, translate, hoo
     return { message, conversation: summary };
   }
 
+  async function deleteMessage() {
+    throw new WhatsAppError(
+      "WhatsApp Cloud API 不支持撤回消息，已仅从本系统删除",
+      "NOT_SUPPORTED"
+    );
+  }
+
   function verifyWebhook(mode, token, challenge) {
     if (mode !== "subscribe" || !credentials.verifyToken) return null;
     if (String(token || "") !== credentials.verifyToken) return null;
@@ -525,6 +532,7 @@ function createWhatsAppService({ db, config, logger, broadcaster, translate, hoo
     ingestWebhook,
     ingestMessage,
     sendReply,
+    deleteMessage,
     verifyWebhook,
     verifySignature
   };

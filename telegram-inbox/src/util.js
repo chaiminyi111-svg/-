@@ -68,10 +68,18 @@ function sleep(ms) {
 function createLogger(level = "info") {
   const levels = { debug: 10, info: 20, warn: 30, error: 40 };
   const threshold = levels[level] || levels.info;
+  const history = [];
 
   function write(kind, message, meta) {
     if ((levels[kind] || 20) < threshold) return;
     const line = `[${new Date().toISOString()}] ${kind.toUpperCase()} ${message}`;
+    history.push({
+      time: new Date().toISOString(),
+      level: kind,
+      message: String(message ?? "").slice(0, 1000),
+      meta: meta === undefined ? "" : String(meta).slice(0, 500)
+    });
+    if (history.length > 300) history.splice(0, history.length - 300);
     if (meta !== undefined) {
       console[kind === "debug" ? "log" : kind](line, meta);
     } else {
@@ -83,7 +91,12 @@ function createLogger(level = "info") {
     debug: (message, meta) => write("debug", message, meta),
     info: (message, meta) => write("info", message, meta),
     warn: (message, meta) => write("warn", message, meta),
-    error: (message, meta) => write("error", message, meta)
+    error: (message, meta) => write("error", message, meta),
+    recent: (limit = 50, level = null) => {
+      const max = Math.min(Math.max(Number(limit) || 50, 1), 200);
+      const rows = level ? history.filter(item => item.level === level) : history;
+      return rows.slice(-max);
+    }
   };
 }
 
@@ -98,6 +111,9 @@ function toPublicUser(row) {
     aiAllowed: Boolean(row.ai_allowed),
     aiEnabled: Boolean(row.ai_enabled),
     aiMode: row.ai_mode || "auto",
+    totpEnabled: Boolean(row.totp_enabled),
+    accountCount: Number(row.account_count || 0),
+    activeConversationCount: Number(row.active_conversation_count || 0),
     createdAt: row.created_at
   };
 }
@@ -125,6 +141,9 @@ function toPublicMessage(row) {
     translationLanguage: row.translation_language || null,
     deliveryStatus: row.delivery_status || null,
     deliveryUpdatedAt: row.delivery_updated_at || null,
+    deletedAt: row.deleted_at || null,
+    deletedBy: row.deleted_by || null,
+    deletionScope: row.deletion_scope || null,
     aiStatus: row.ai_status || null,
     aiError: row.ai_error || null,
     createdAt: row.created_at

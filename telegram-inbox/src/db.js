@@ -164,9 +164,15 @@ function openDatabase(dbPath) {
   ensureColumn(db, "messages", "translation_language", "TEXT");
   ensureColumn(db, "messages", "delivery_status", "TEXT");
   ensureColumn(db, "messages", "delivery_updated_at", "TEXT");
+  ensureColumn(db, "messages", "deleted_at", "TEXT");
+  ensureColumn(db, "messages", "deleted_by", "INTEGER");
+  ensureColumn(db, "messages", "deletion_scope", "TEXT");
+  ensureColumn(db, "messages", "deletion_reason", "TEXT");
   ensureColumn(db, "users", "ai_allowed", "INTEGER NOT NULL DEFAULT 0");
   ensureColumn(db, "users", "ai_enabled", "INTEGER NOT NULL DEFAULT 0");
   ensureColumn(db, "users", "ai_mode", "TEXT NOT NULL DEFAULT 'auto'");
+  ensureColumn(db, "users", "totp_secret", "TEXT");
+  ensureColumn(db, "users", "totp_enabled", "INTEGER NOT NULL DEFAULT 0");
   ensureColumn(db, "messages", "ai_status", "TEXT");
   ensureColumn(db, "messages", "ai_error", "TEXT");
   ensureColumn(db, "messages", "ai_reply_message_id", "INTEGER");

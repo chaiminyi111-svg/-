@@ -118,6 +118,7 @@ const state = {
   customerDirty: false,
   stats: null,
   statsDays: 7,
+  teamDaily: null,
   sidebarStats: null,
   sidebarTimer: null,
   viewerDays: 1,
@@ -125,6 +126,7 @@ const state = {
   replyLanguages: {},
   assignment: { enabled: false, strategy: "least_active", maxActive: 0 },
   channels: { telegram: null, whatsapp: null, whatsappWeb: null, translate: null, ai: null },
+  admin: { system: null, users: [], audit: null, backups: [], diagnostics: null, security: null, tab: "overview" },
   whatsappWebPollTimer: null,
   ai: {
     configured: false,
@@ -154,10 +156,11 @@ const state = {
 };
 
 class ApiError extends Error {
-  constructor(message, status = 0) {
+  constructor(message, status = 0, data = null) {
     super(message);
     this.name = "ApiError";
     this.status = status;
+    this.data = data;
   }
 }
 
@@ -185,7 +188,7 @@ async function api(path, options = {}) {
 
   if (!response.ok) {
     if (response.status === 401 && state.me) handleSessionExpired();
-    throw new ApiError(data.error || `请求失败（${response.status}）`, response.status);
+    throw new ApiError(data.error || `请求失败（${response.status}）`, response.status, data);
   }
   return data;
 }
@@ -297,6 +300,7 @@ function showInbox() {
   $("#currentUser").textContent = `${state.me.displayName} · ${roleLabel(state.me.role)}`;
   $("#channelsBtn").hidden = state.me.role !== "admin";
   $("#teamBtn").hidden = state.me.role !== "admin";
+  $("#adminBtn").hidden = state.me.role !== "admin";
   $("#personalAccountsBtn").hidden = state.me.role === "viewer" || !state.personal.enabled;
   $("#modeSwitch").hidden = state.me.role === "viewer" || !state.personal.enabled;
   $("#aiBtn").hidden = state.me.role === "viewer";
@@ -555,9 +559,12 @@ function showLogin() {
   stopPersonalPolling();
   state.mode = "shared";
   $("#teamModal").hidden = true;
+  $("#adminModal").hidden = true;
   $("#passwordModal").hidden = true;
   $("#cannedModal").hidden = true;
   $("#statsModal").hidden = true;
+  $("#loginTotpWrap").hidden = true;
+  $("#loginTotp").value = "";
   $("#customerPanel").hidden = true;
   state.stats = null;
   state.sidebarStats = null;
@@ -995,7 +1002,19 @@ function buildMessageRow(message) {
     time.appendChild(delivery);
   }
 
-  stack.append(bubble, time);
+  const actions = document.createElement("div");
+  actions.className = "message-actions";
+  const remove = document.createElement("button");
+  remove.type = "button";
+  remove.className = "message-action";
+  remove.dataset.messageAction = "delete";
+  remove.dataset.messageId = String(message.id);
+  remove.dataset.direction = message.direction;
+  remove.textContent = out ? "撤回" : "删除";
+  remove.title = out ? "撤回这条消息" : "删除对方这条消息";
+  actions.appendChild(remove);
+
+  stack.append(bubble, time, actions);
   row.appendChild(stack);
   return row;
 }
@@ -1512,6 +1531,17 @@ function handleRealtime(event) {
     return;
   }
 
+  if (event.type === "message.deleted") {
+    if (state.activeId === event.conversationId) {
+      state.messages = state.messages.filter(message => message.id !== event.messageId);
+      renderMessages();
+    }
+    renderConversationList();
+    if (state.activeId === event.conversationId) renderChatHeader();
+    scheduleSidebarStats();
+    return;
+  }
+
   if (event.type === "message.status" && event.message) {
     if (state.activeId === event.message.conversationId) {
       upsertMessage(event.message);
@@ -1582,6 +1612,31 @@ async function refreshActiveThread() {
     renderMessages({ scrollToBottom: nearBottom });
     markRead(id, { silent: true });
   } catch {}
+}
+
+async function removeMessage(messageId, direction) {
+  const label = direction === "out" ? "撤回" : "删除";
+  if (!window.confirm(`确定${label}这条消息？`)) return;
+  try {
+    const data = await api(`/api/messages/${encodeURIComponent(messageId)}`, {
+      method: "DELETE",
+      body: { remote: true }
+    });
+    state.messages = state.messages.filter(message => message.id !== Number(messageId));
+    if (data.conversation) {
+      state.active = data.conversation;
+      upsertConversation(data.conversation);
+    }
+    renderMessages();
+    renderConversationList();
+    renderChatHeader();
+    showToast(
+      data.remote ? "消息已撤回" : `已从本地删除${data.warning ? "：" + data.warning : ""}`,
+      data.remote ? "success" : ""
+    );
+  } catch (error) {
+    showToast(error.message, "error");
+  }
 }
 
 async function sendMessage() {
@@ -1767,10 +1822,15 @@ async function openStatsModal() {
 async function loadStats() {
   const days = Number($("#statsRange").value) || 7;
   try {
-    const data = await api(`/api/stats?days=${days}`);
+    const [data, team] = await Promise.all([
+      api(`/api/stats?days=${days}`),
+      api(`/api/stats/team-daily?days=${days}`)
+    ]);
     state.stats = data.stats;
+    state.teamDaily = team.stats;
     state.statsDays = days;
     renderStats();
+    renderTeamDaily();
   } catch (error) {
     showToast(error.message, "error");
   }
@@ -1779,10 +1839,15 @@ async function loadStats() {
 async function loadViewerStats() {
   const days = Number($("#viewerRange").value) || 1;
   try {
-    const data = await api(`/api/stats?days=${days}`);
+    const [data, team] = await Promise.all([
+      api(`/api/stats?days=${days}`),
+      api(`/api/stats/team-daily?days=${days}`)
+    ]);
     state.stats = data.stats;
+    state.teamDaily = team.stats;
     state.viewerDays = days;
     renderStats();
+    renderTeamDaily();
     $("#viewerSubtitle").textContent = days === 1
       ? "只读统计账号 · 今日数据 · 不显示客户会话内容。"
       : `只读统计账号 · 最近 ${days} 天 · 不显示客户会话内容。`;
@@ -1824,7 +1889,9 @@ function renderStats() {
     ["未分配", totals.unassigned, "等待分配"],
     ["平均首响", formatMinutes(totals.avgFirstResponseMinutes), `SLA ${totals.slaTargetMinutes || 15} 分钟`],
     ["平均解决", formatMinutes(totals.avgResolutionMinutes), "已关闭会话"],
-    ["SLA 超时", totals.slaBreaches, "需要优先处理"]
+    ["SLA 超时", totals.slaBreaches, "需要优先处理"],
+    ["SLA 达标率", `${totals.slaComplianceRate ?? 100}%`, "区间内新分配会话"],
+    ["未回复会话", totals.unanswered, "最后一条是客户消息"]
   ];
 
   for (const cardBox of [$("#statsCards"), $("#viewerCards")]) {
@@ -1916,6 +1983,138 @@ function renderStats() {
         row.appendChild(cell);
       }
       tbody.appendChild(row);
+    }
+  }
+}
+
+function renderTeamSummary(data) {
+  for (const container of [$("#statsTeamSummary"), $("#viewerTeamSummary")]) {
+    if (!container) continue;
+    container.replaceChildren();
+    const team = data.team;
+    if (!team) continue;
+    const cards = [
+      ["团队进人", team.totalNewContacts, "区间内去重联系人"],
+      ["活跃联系人", team.totalContacts, "进人 + 有效去重"],
+      ["有效聊天", team.totalEffectiveContacts, "双方有来有回"],
+      ["重复联系人", team.duplicateContacts, `重复率 ${team.duplicateRate}%`],
+      ["有效聊天占比", `${team.effectiveRate}%`, "有效 / 活跃联系人"],
+      ["活跃员工", `${team.activeEmployees}/${team.totalEmployees}`, `零接待 ${team.zeroContactEmployees}`],
+      ["人均进人", team.avgNewPerEmployee, "团队平均值"],
+      ["人均有效", team.avgEffectivePerEmployee, "团队平均值"],
+      ["收到 / 发出", `${team.inbound} / ${team.outbound}`, "区间消息量"]
+    ];
+    for (const [label, value, noteText] of cards) {
+      const item = document.createElement("div");
+      item.className = "stats-card-item";
+      const name = document.createElement("span");
+      name.textContent = label;
+      const number = document.createElement("strong");
+      number.textContent = typeof value === "string" ? value : Number(value || 0).toLocaleString("zh-CN");
+      const note = document.createElement("small");
+      note.textContent = noteText;
+      item.append(name, number, note);
+      container.appendChild(item);
+    }
+  }
+}
+
+function renderTeamDaily() {
+  const data = state.teamDaily;
+  if (!data) return;
+  const hint = $("#teamDailyHint");
+  if (hint) hint.textContent = data.definition || "";
+  renderTeamSummary(data);
+
+  for (const [tableId, duplicateId] of [
+    ["#statsTeamDaily", "#statsDuplicates"],
+    ["#viewerTeamDaily", "#viewerDuplicates"]
+  ]) {
+    const wrap = $(tableId);
+    const duplicateBox = $(duplicateId);
+    if (!wrap) continue;
+    wrap.replaceChildren();
+    if (!data.users?.length || !data.daily?.length) {
+      const empty = document.createElement("p");
+      empty.className = "admin-empty";
+      empty.textContent = "暂无员工统计数据";
+      wrap.appendChild(empty);
+      if (duplicateBox) duplicateBox.replaceChildren();
+      continue;
+    }
+
+    const table = document.createElement("table");
+    const thead = document.createElement("thead");
+    const headRow = document.createElement("tr");
+    const dateHead = document.createElement("th");
+    dateHead.textContent = "日期";
+    headRow.appendChild(dateHead);
+    for (const user of data.users) {
+      const th = document.createElement("th");
+      th.textContent = user.displayName;
+      th.title = "进人 / 有效 / 重复";
+      headRow.appendChild(th);
+    }
+    thead.appendChild(headRow);
+    table.appendChild(thead);
+
+    const tbody = document.createElement("tbody");
+    for (const day of data.daily) {
+      const row = document.createElement("tr");
+      const dateCell = document.createElement("td");
+      dateCell.className = "team-day";
+      dateCell.textContent = day.date.slice(5).replace("-", "/");
+      if (day.team) {
+        const teamLine = document.createElement("small");
+        teamLine.textContent = `团队 进${day.team.newContacts} · 有效${day.team.effectiveContacts} · 重复${day.team.duplicateContacts}`;
+        dateCell.appendChild(teamLine);
+      }
+      row.appendChild(dateCell);
+      for (const employee of day.employees) {
+        const cell = document.createElement("td");
+        const values = [
+          ["进 " + employee.newContacts, employee.newContacts > 0],
+          ["有效 " + employee.effectiveContacts, employee.effectiveContacts > 0],
+          ["重 " + employee.duplicateContacts, employee.duplicateContacts > 0]
+        ];
+        for (const [text, active] of values) {
+          const span = document.createElement("span");
+          span.className = "team-count" +
+            (active ? "" : " team-zero") +
+            (text.startsWith("重 ") && active ? " dup" : "");
+          span.textContent = text;
+          cell.appendChild(span);
+          cell.appendChild(document.createTextNode(" "));
+        }
+        row.appendChild(cell);
+      }
+      tbody.appendChild(row);
+    }
+    table.appendChild(tbody);
+    wrap.appendChild(table);
+
+    if (duplicateBox) {
+      duplicateBox.replaceChildren();
+      if (data.duplicates?.length) {
+        for (const duplicate of data.duplicates) {
+          const item = document.createElement("div");
+          item.className = "duplicate-item";
+          const name = document.createElement("strong");
+          name.textContent = duplicate.contact;
+          item.appendChild(name);
+          const duplicateDays = duplicate.duplicateDays?.length || 0;
+          item.appendChild(document.createTextNode(
+            ` 同时出现在 ${duplicate.employeeNames.join("、")} 名下，涉及 ${duplicate.days.length} 天` +
+            (duplicateDays ? `，其中 ${duplicateDays} 天同日重复` : "（跨天重复）")
+          ));
+          duplicateBox.appendChild(item);
+        }
+      } else {
+        const none = document.createElement("p");
+        none.className = "admin-empty";
+        none.textContent = "没有发现跨员工重复联系人。";
+        duplicateBox.appendChild(none);
+      }
     }
   }
 }
@@ -3112,9 +3311,11 @@ async function updateTeamUser(id, payload) {
       $("#currentUser").textContent = `${state.me.displayName} · ${roleLabel(state.me.role)}`;
       $("#channelsBtn").hidden = state.me.role !== "admin";
       $("#teamBtn").hidden = state.me.role !== "admin";
+      $("#adminBtn").hidden = state.me.role !== "admin";
       if (state.me.role !== "admin") {
         $("#channelsModal").hidden = true;
         $("#teamModal").hidden = true;
+        $("#adminModal").hidden = true;
       }
       if (state.me.role === "viewer") {
         showToast("成员已更新", "success");
@@ -3146,6 +3347,714 @@ async function resetUserPassword(user) {
     showToast("密码已重置", "success");
   } catch (error) {
     showToast(error.message, "error");
+  }
+}
+
+/* ---------- Admin console ---------- */
+const AUDIT_LABELS = {
+  "auth.login": "管理员/员工登录",
+  "auth.logout": "退出登录",
+  "auth.password_changed": "修改密码",
+  "user.created": "创建员工",
+  "user.updated": "修改员工",
+  "user.password_reset": "重置员工密码",
+  "user.force_logout": "强制下线",
+  "account.created": "绑定个人号",
+  "account.login_started": "开始个人号登录",
+  "account.relogin_started": "重新生成个人号二维码",
+  "account.password_submitted": "提交个人号两步密码",
+  "account.logged_out": "退出个人号",
+  "account.removed": "删除个人号",
+  "account.reconnected": "重连个人号",
+  "message.recalled": "撤回消息",
+  "message.deleted": "删除消息",
+  "telegram.token_updated": "修改 Telegram 渠道",
+  "telegram.token_cleared": "清除 Telegram 渠道",
+  "telegram.token_tested": "测试 Telegram Token",
+  "whatsapp.credentials_updated": "修改 WhatsApp 渠道",
+  "whatsapp.credentials_cleared": "清除 WhatsApp 渠道",
+  "whatsapp_web.login_started": "WhatsApp 个人号扫码",
+  "whatsapp_web.logged_out": "WhatsApp 个人号退出",
+  "whatsapp_web.reconnected": "WhatsApp 个人号重连",
+  "data.backup_created": "创建数据库备份",
+  "data.backup_downloaded": "下载数据库备份",
+  "data.conversations_exported": "导出会话 CSV",
+  "data.messages_cleaned": "清理旧消息",
+  "security.ip_allowlist_updated": "修改管理员 IP 白名单",
+  "security.totp_setup_started": "生成两步验证密钥",
+  "security.totp_enabled": "开启两步验证",
+  "security.totp_disabled": "关闭两步验证"
+};
+
+function auditLabel(action) {
+  return AUDIT_LABELS[action] || action;
+}
+
+function formatBytes(value) {
+  const bytes = Number(value) || 0;
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  if (bytes < 1024 * 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+  return `${(bytes / 1024 / 1024 / 1024).toFixed(2)} GB`;
+}
+
+function formatUptime(seconds) {
+  const total = Math.max(0, Number(seconds) || 0);
+  const days = Math.floor(total / 86400);
+  const hours = Math.floor((total % 86400) / 3600);
+  const minutes = Math.floor((total % 3600) / 60);
+  if (days) return `${days} 天 ${hours} 小时`;
+  if (hours) return `${hours} 小时 ${minutes} 分钟`;
+  return `${minutes} 分钟`;
+}
+
+function formatDateTime(iso) {
+  const date = new Date(iso);
+  if (!Number.isFinite(date.getTime())) return iso || "";
+  return date.toLocaleString("zh-CN", { hour12: false });
+}
+
+function renderAdminCards(container, cards) {
+  if (!container) return;
+  container.replaceChildren();
+  for (const [label, value, hint] of cards) {
+    const item = document.createElement("div");
+    item.className = "stats-card-item";
+    const name = document.createElement("span");
+    name.textContent = label;
+    const number = document.createElement("strong");
+    number.textContent = value;
+    const note = document.createElement("small");
+    note.textContent = hint || "";
+    item.append(name, number, note);
+    container.appendChild(item);
+  }
+}
+
+function openAdminModal(tab = "overview") {
+  if (state.me?.role !== "admin") return;
+  $("#adminModal").hidden = false;
+  switchAdminTab(tab);
+}
+
+function switchAdminTab(tab) {
+  state.admin.tab = tab;
+  $$(".admin-tab").forEach(button => {
+    button.classList.toggle("active", button.dataset.adminTab === tab);
+  });
+  $$(".admin-panel").forEach(panel => {
+    panel.hidden = panel.dataset.adminPanel !== tab;
+  });
+  loadAdminPanel(tab);
+}
+
+async function loadAdminPanel(tab) {
+  if (tab === "overview") return loadAdminSystem();
+  if (tab === "employees") return loadAdminUsers();
+  if (tab === "audit") return loadAdminAudit();
+  if (tab === "data") return loadAdminData();
+  if (tab === "channels") return loadAdminChannels();
+  if (tab === "security") return loadAdminSecurity();
+}
+
+async function loadAdminSystem() {
+  try {
+    const data = await api("/api/admin/system");
+    state.admin.system = data.system;
+    renderAdminSystem();
+  } catch (error) {
+    showToast(error.message, "error");
+  }
+}
+
+function renderAdminSystem() {
+  const system = state.admin.system;
+  if (!system) return;
+  const channels = system.channels || {};
+  const accounts = system.accounts || {};
+  renderAdminCards($("#adminSystemCards"), [
+    ["运行时间", formatUptime(system.uptimeSeconds), "Node 服务"],
+    ["Node 版本", system.nodeVersion, system.platform],
+    ["进程内存", formatBytes(system.memory?.rss), `堆 ${formatBytes(system.memory?.heapUsed)}`],
+    ["磁盘", system.disk ? `${formatBytes(system.disk.used)} / ${formatBytes(system.disk.total)}` : "—", system.disk ? `剩余 ${formatBytes(system.disk.free)}` : "无法读取"],
+    ["数据库", formatBytes(system.database?.size), `WAL ${formatBytes(system.database?.walSize)}`],
+    ["个人号在线", `${accounts.online || 0} / ${accounts.total || 0}`, "已登录 / 已绑定"],
+    ["Telegram", channels.telegram?.configured ? "已配置" : "未配置", channels.telegram?.running ? "轮询中" : "未运行"],
+    ["WhatsApp", channels.whatsapp?.configured ? "已配置" : "未配置", channels.whatsapp?.phoneNumberId || "Cloud API"],
+    ["WhatsApp 个人号", channels.whatsappWeb?.running ? "在线" : channels.whatsappWeb?.enabled ? "等待扫码" : "未启用", "Web 扫码"],
+    ["最近错误", String((system.recentErrors || []).length), "最近 30 条"]
+  ]);
+
+  const summary = $("#adminAccountSummary");
+  if (summary) {
+    summary.replaceChildren();
+    const rows = [
+      ["绑定总数", String(accounts.total || 0)],
+      ["在线数量", String(accounts.online || 0)],
+      ...Object.entries(accounts.byChannel || {}).map(([channel, value]) =>
+        [channel === "whatsapp_web" ? "WhatsApp" : "Telegram", `${value.online || 0} / ${value.total || 0}`]
+      ),
+      ...(accounts.errors || []).map(item => [
+        `${item.ownerName || item.channel} 错误`,
+        item.error
+      ])
+    ];
+    for (const [label, value] of rows) {
+      const row = document.createElement("div");
+      row.className = "admin-kv-row";
+      const key = document.createElement("span");
+      key.textContent = label;
+      const val = document.createElement("strong");
+      val.textContent = value;
+      row.append(key, val);
+      summary.appendChild(row);
+    }
+  }
+
+  const errors = $("#adminRecentErrors");
+  if (errors) {
+    errors.replaceChildren();
+    if (!system.recentErrors?.length) {
+      const empty = document.createElement("p");
+      empty.className = "admin-empty";
+      empty.textContent = "没有错误日志。";
+      errors.appendChild(empty);
+    } else {
+      for (const item of system.recentErrors) {
+        const row = document.createElement("div");
+        row.className = "admin-log-item";
+        const title = document.createElement("strong");
+        title.textContent = formatDateTime(item.time);
+        row.appendChild(title);
+        row.appendChild(document.createTextNode(" " + item.message));
+        if (item.meta) {
+          const meta = document.createElement("div");
+          meta.textContent = item.meta;
+          row.appendChild(meta);
+        }
+        errors.appendChild(row);
+      }
+    }
+  }
+}
+
+async function loadAdminUsers() {
+  try {
+    const data = await api("/api/users?includeInactive=1");
+    state.admin.users = data.users || [];
+    renderAdminUsers();
+  } catch (error) {
+    showToast(error.message, "error");
+  }
+}
+
+function renderAdminUsers() {
+  const tbody = $("#adminUserRows");
+  if (!tbody) return;
+  tbody.replaceChildren();
+  for (const user of state.admin.users) {
+    const row = document.createElement("tr");
+    const nameCell = document.createElement("td");
+    const name = document.createElement("strong");
+    name.textContent = user.displayName + (user.id === state.me?.id ? "（我）" : "");
+    const username = document.createElement("div");
+    username.textContent = "@" + user.username;
+    nameCell.append(name, username);
+
+    const role = document.createElement("td");
+    role.textContent = roleLabel(user.role);
+
+    const status = document.createElement("td");
+    status.innerHTML = `<span class="admin-status-pill ${user.active ? "on" : "off"}">${user.active ? "启用" : "停用"}</span>`;
+
+    const activeConversations = document.createElement("td");
+    activeConversations.textContent = String(user.activeConversationCount || 0);
+
+    const accounts = document.createElement("td");
+    accounts.textContent = String(user.accountCount || 0);
+
+    const totp = document.createElement("td");
+    totp.innerHTML = `<span class="admin-status-pill ${user.totpEnabled ? "on" : ""}">${user.totpEnabled ? "已开启" : "未开启"}</span>`;
+
+    const actions = document.createElement("td");
+    actions.className = "admin-actions";
+    const reset = document.createElement("button");
+    reset.className = "mini-button";
+    reset.textContent = "重置密码";
+    reset.dataset.adminUserAction = "reset";
+    reset.dataset.userId = String(user.id);
+    const toggle = document.createElement("button");
+    toggle.className = "mini-button" + (user.active ? " danger" : "");
+    toggle.textContent = user.active ? "停用" : "启用";
+    toggle.dataset.adminUserAction = "toggle";
+    toggle.dataset.userId = String(user.id);
+    toggle.disabled = user.id === state.me?.id;
+    const logout = document.createElement("button");
+    logout.className = "mini-button";
+    logout.textContent = "强制下线";
+    logout.dataset.adminUserAction = "logout";
+    logout.dataset.userId = String(user.id);
+    logout.disabled = user.id === state.me?.id;
+    actions.append(reset, toggle, logout);
+
+    row.append(nameCell, role, status, activeConversations, accounts, totp, actions);
+    tbody.appendChild(row);
+  }
+}
+
+async function adminUserAction(action, userId) {
+  const user = state.admin.users.find(item => item.id === userId);
+  if (!user) return;
+  if (action === "reset") {
+    const password = window.prompt(`为 ${user.displayName} 设置新密码（至少 8 位）`);
+    if (password === null) return;
+    if (password.length < 8) return showToast("密码至少 8 位", "error");
+    try {
+      await api(`/api/users/${userId}/password`, { method: "POST", body: { password } });
+      showToast("密码已重置", "success");
+    } catch (error) {
+      showToast(error.message, "error");
+    }
+    return;
+  }
+  if (action === "toggle") {
+    try {
+      await api(`/api/users/${userId}`, { method: "PATCH", body: { active: !user.active } });
+      showToast(user.active ? "员工已停用" : "员工已启用", "success");
+      await loadAdminUsers();
+    } catch (error) {
+      showToast(error.message, "error");
+    }
+    return;
+  }
+  if (action === "logout") {
+    if (!window.confirm(`强制 ${user.displayName} 下线？`)) return;
+    try {
+      await api(`/api/users/${userId}/logout`, { method: "POST", body: {} });
+      showToast("已强制下线", "success");
+    } catch (error) {
+      showToast(error.message, "error");
+    }
+  }
+}
+
+async function adminCreateUser(event) {
+  event.preventDefault();
+  const message = $("#adminUserMessage");
+  message.hidden = true;
+  try {
+    await api("/api/users", {
+      method: "POST",
+      body: {
+        username: $("#adminNewUsername").value,
+        displayName: $("#adminNewDisplayName").value,
+        password: $("#adminNewPassword").value,
+        role: $("#adminNewRole").value
+      }
+    });
+    event.target.reset();
+    showToast("员工账号已创建", "success");
+    await loadAdminUsers();
+  } catch (error) {
+    message.textContent = error.message;
+    message.hidden = false;
+  }
+}
+
+async function loadAdminAudit() {
+  try {
+    const action = $("#adminAuditAction")?.value.trim() || "";
+    const data = await api(`/api/admin/audit?limit=150&action=${encodeURIComponent(action)}`);
+    state.admin.audit = data.audit;
+    renderAdminAudit();
+  } catch (error) {
+    showToast(error.message, "error");
+  }
+}
+
+function renderAdminAudit() {
+  const box = $("#adminAuditList");
+  if (!box) return;
+  box.replaceChildren();
+  const items = state.admin.audit?.items || [];
+  if (!items.length) {
+    const empty = document.createElement("p");
+    empty.className = "admin-empty";
+    empty.textContent = "没有审计记录。";
+    box.appendChild(empty);
+    return;
+  }
+  for (const item of items) {
+    const row = document.createElement("div");
+    row.className = "admin-audit-item";
+    const title = document.createElement("strong");
+    title.textContent = auditLabel(item.action);
+    const code = document.createElement("code");
+    code.textContent = item.action;
+    const meta = document.createElement("div");
+    meta.textContent = `${formatDateTime(item.createdAt)} · ${item.userName || "系统"}` +
+      (item.targetType ? ` · ${item.targetType}#${item.targetId || ""}` : "");
+    row.append(title, document.createTextNode(" "), code, meta);
+    if (item.detail) {
+      const detail = document.createElement("div");
+      detail.textContent = String(item.detail).slice(0, 300);
+      row.appendChild(detail);
+    }
+    box.appendChild(row);
+  }
+}
+
+async function loadAdminData() {
+  try {
+    const [systemData, backupData] = await Promise.all([
+      api("/api/admin/system"),
+      api("/api/admin/backups")
+    ]);
+    state.admin.system = systemData.system;
+    state.admin.backups = backupData.backups || [];
+    renderAdminData();
+  } catch (error) {
+    showToast(error.message, "error");
+  }
+}
+
+function renderAdminData() {
+  const system = state.admin.system;
+  const summary = $("#adminDataSummary");
+  if (summary && system) {
+    summary.replaceChildren();
+    const rows = [
+      ["数据库大小", formatBytes(system.database?.size)],
+      ["WAL 大小", formatBytes(system.database?.walSize)],
+      ["数据库路径", system.database?.path || "—"],
+      ["磁盘剩余", system.disk ? formatBytes(system.disk.free) : "—"]
+    ];
+    for (const [label, value] of rows) {
+      const row = document.createElement("div");
+      row.className = "admin-kv-row";
+      const key = document.createElement("span");
+      key.textContent = label;
+      const val = document.createElement("strong");
+      val.textContent = value;
+      row.append(key, val);
+      summary.appendChild(row);
+    }
+  }
+
+  const list = $("#adminBackupList");
+  if (list) {
+    list.replaceChildren();
+    if (!state.admin.backups.length) {
+      const empty = document.createElement("p");
+      empty.className = "admin-empty";
+      empty.textContent = "还没有备份。点击「立即备份」生成。";
+      list.appendChild(empty);
+    } else {
+      for (const backup of state.admin.backups) {
+        const row = document.createElement("div");
+        row.className = "admin-backup-item";
+        const name = document.createElement("strong");
+        name.textContent = backup.name;
+        const meta = document.createElement("div");
+        meta.textContent = `${formatDateTime(backup.createdAt)} · ${formatBytes(backup.size)}`;
+        const link = document.createElement("a");
+        link.href = `/api/admin/backups/${encodeURIComponent(backup.name)}/download`;
+        link.textContent = "下载";
+        row.append(name, meta, link);
+        list.appendChild(row);
+      }
+    }
+  }
+}
+
+async function adminCreateBackup() {
+  try {
+    const data = await api("/api/admin/backups", { method: "POST", body: {} });
+    showToast(`备份完成：${data.backup.name}`, "success");
+    await loadAdminData();
+  } catch (error) {
+    showToast(error.message, "error");
+  }
+}
+
+function adminExportConversations() {
+  window.location.assign("/api/admin/export/conversations.csv");
+}
+
+async function adminCleanup(preview) {
+  const result = $("#adminCleanupResult");
+  const days = Number($("#adminCleanupDays").value) || 30;
+  const confirmCode = $("#adminCleanupConfirm").value.trim();
+  if (!preview) {
+    if (confirmCode !== "CLEANUP") {
+      result.textContent = "实际清理需要输入确认码 CLEANUP。";
+      return;
+    }
+    if (!window.confirm(`确定删除 ${days} 天以前的旧消息？会话会保留，此操作不可恢复。`)) return;
+  }
+  try {
+    const data = await api("/api/admin/data/cleanup", {
+      method: "POST",
+      body: { days, dryRun: preview, confirm: confirmCode }
+    });
+    const cleanup = data.cleanup;
+    result.textContent = preview
+      ? `预览：将删除 ${cleanup.wouldDelete} 条旧消息（保留最近 ${cleanup.days} 天）。`
+      : `已删除 ${cleanup.deleted} 条旧消息。`;
+    if (!preview) await loadAdminData();
+  } catch (error) {
+    result.textContent = error.message;
+  }
+}
+
+async function loadAdminChannels() {
+  try {
+    const data = await api("/api/admin/diagnostics");
+    state.admin.diagnostics = data.diagnostics;
+    renderAdminDiagnostics();
+  } catch (error) {
+    showToast(error.message, "error");
+  }
+}
+
+function renderAdminDiagnostics() {
+  const data = state.admin.diagnostics;
+  const box = $("#adminDiagnostics");
+  if (!data || !box) return;
+  const rows = [
+    ["Telegram Bot", data.telegram?.configured, data.telegram?.running,
+      data.telegram?.bot ? `@${data.telegram.bot.username || data.telegram.bot.id}` : "未配置",
+      data.telegram?.warning],
+    ["WhatsApp Cloud API", data.whatsapp?.configured, data.whatsapp?.configured,
+      data.whatsapp?.info?.displayPhoneNumber || data.whatsapp?.phoneNumberId || "未配置",
+      data.whatsapp?.warning],
+    ["WhatsApp 个人号", data.whatsappWeb?.enabled, data.whatsappWeb?.running,
+      data.whatsappWeb?.running ? "在线" : data.whatsappWeb?.loginInProgress ? "等待扫码" : "未登录",
+      data.whatsappWeb?.error]
+  ];
+  box.innerHTML = rows.map(([label, configured, running, detail, warning]) => `
+    <div class="admin-diag-row">
+      <div>
+        <strong>${escapeHtml(label)}</strong>
+        <div>${escapeHtml(detail || "")}</div>
+        ${warning ? `<div class="admin-warning">${escapeHtml(warning)}</div>` : ""}
+      </div>
+      <span class="admin-status-pill ${running ? "on" : configured ? "" : "off"}">
+        ${running ? "在线" : configured ? "已配置" : "未配置"}
+      </span>
+    </div>
+  `).join("");
+
+  if (data.whatsappWeb?.enabled) {
+    const actions = document.createElement("div");
+    actions.className = "admin-actions";
+    const login = document.createElement("button");
+    login.className = "mini-button";
+    login.textContent = data.whatsappWeb.loginInProgress ? "重新生成二维码" : "开始扫码";
+    login.dataset.adminChannelAction = "whatsapp-login";
+    const reconnect = document.createElement("button");
+    reconnect.className = "mini-button";
+    reconnect.textContent = "重连";
+    reconnect.dataset.adminChannelAction = "whatsapp-reconnect";
+    const logout = document.createElement("button");
+    logout.className = "mini-button danger";
+    logout.textContent = "退出个人号";
+    logout.dataset.adminChannelAction = "whatsapp-logout";
+    actions.append(login, reconnect, logout);
+    box.appendChild(actions);
+  }
+
+  if (data.whatsappWeb?.qr) {
+    const qr = document.createElement("div");
+    qr.className = "admin-block";
+    qr.innerHTML = `<h4>WhatsApp 个人号二维码</h4><img src="${data.whatsappWeb.qr}" alt="WhatsApp 二维码" width="260" height="260"><p class="channel-note">用手机 WhatsApp 扫描；过期后点下方重新生成。</p>`;
+    box.appendChild(qr);
+  }
+
+  const accountBox = $("#adminDiagnosticAccounts");
+  if (accountBox) {
+    accountBox.replaceChildren();
+    if (!data.accounts?.length) {
+      const empty = document.createElement("p");
+      empty.className = "admin-empty";
+      empty.textContent = "还没有绑定个人号。";
+      accountBox.appendChild(empty);
+    } else {
+      for (const account of data.accounts) {
+        const row = document.createElement("div");
+        row.className = "admin-account-item";
+        const title = document.createElement("strong");
+        title.textContent = `${account.channel === "whatsapp_web" ? "WhatsApp" : "Telegram"} · ${account.ownerName || account.label}`;
+        const status = document.createElement("div");
+        status.textContent = `${account.displayName || account.label || ""} · ${account.status?.running ? "在线" : "离线"}`;
+        if (account.status?.error) {
+          const error = document.createElement("div");
+          error.className = "admin-warning";
+          error.textContent = account.status.error;
+          status.appendChild(error);
+        }
+        const actions = document.createElement("div");
+        actions.className = "admin-actions";
+        const relogin = document.createElement("button");
+        relogin.className = "mini-button";
+        relogin.textContent = "重新生成二维码";
+        relogin.dataset.adminAccountAction = "relogin";
+        relogin.dataset.accountId = String(account.id);
+        const reconnect = document.createElement("button");
+        reconnect.className = "mini-button";
+        reconnect.textContent = "重连";
+        reconnect.dataset.adminAccountAction = "reconnect";
+        reconnect.dataset.accountId = String(account.id);
+        const logout = document.createElement("button");
+        logout.className = "mini-button danger";
+        logout.textContent = "断开";
+        logout.dataset.adminAccountAction = "logout";
+        logout.dataset.accountId = String(account.id);
+        const remove = document.createElement("button");
+        remove.className = "mini-button danger";
+        remove.textContent = "解绑";
+        remove.dataset.adminAccountAction = "remove";
+        remove.dataset.accountId = String(account.id);
+        actions.append(relogin, reconnect, logout, remove);
+        row.append(title, status, actions);
+        accountBox.appendChild(row);
+      }
+    }
+  }
+}
+
+async function adminAccountAction(action, accountId) {
+  if (!accountId) return;
+  const confirmText = action === "relogin"
+    ? "重新生成二维码会先断开当前登录，确定继续？"
+    : action === "remove"
+      ? "解绑后会话记录会保留，但这个个人号需要重新绑定。确定继续？"
+      : action === "reconnect"
+        ? "确定重新连接这个个人号？"
+        : "确定断开这个个人号？";
+  if (!window.confirm(confirmText)) return;
+  try {
+    if (action === "remove") {
+      await api(`/api/accounts/${accountId}`, { method: "DELETE" });
+      showToast("个人号已解绑", "success");
+    } else {
+      const path = action === "relogin" ? "relogin" : action === "reconnect" ? "reconnect" : "logout";
+      await api(`/api/accounts/${accountId}/${path}`, { method: "POST", body: {} });
+      showToast(action === "relogin" ? "二维码已重新生成" : action === "reconnect" ? "个人号已重连" : "个人号已断开", "success");
+    }
+    await loadAdminChannels();
+  } catch (error) {
+    showToast(error.message, "error");
+  }
+}
+
+async function adminTelegramTest(event) {
+  event.preventDefault();
+  const result = $("#adminTelegramTestResult");
+  result.textContent = "测试中…";
+  try {
+    const data = await api("/api/admin/diagnostics/telegram/test", {
+      method: "POST",
+      body: { token: $("#adminTelegramTestToken").value.trim() }
+    });
+    result.textContent = `连接成功：@${data.bot.username || data.bot.id}`;
+  } catch (error) {
+    result.textContent = error.message;
+  }
+}
+
+async function loadAdminSecurity() {
+  try {
+    const data = await api("/api/admin/security");
+    state.admin.security = data.security;
+    renderAdminSecurity();
+  } catch (error) {
+    showToast(error.message, "error");
+  }
+}
+
+function renderAdminSecurity() {
+  const security = state.admin.security;
+  if (!security) return;
+  $("#adminCurrentIp").textContent = security.currentIp || "—";
+  $("#adminIpAllowlist").value = (security.ipAllowlist || []).join("\n");
+  $("#adminTotpStatus").textContent = security.totpEnabled
+    ? "两步验证已开启。登录时需要输入验证器中的 6 位验证码。"
+    : security.totpPending
+      ? "已生成密钥，但还没有完成验证。"
+      : "两步验证未开启。";
+  $("#adminTotpSetup").disabled = Boolean(security.totpEnabled);
+  $("#adminTotpEnableForm").hidden = !security.totpPending;
+  $("#adminTotpDisableForm").hidden = !security.totpEnabled;
+  if (!security.totpPending) $("#adminTotpSetupResult").hidden = true;
+}
+
+async function adminIpSave() {
+  const message = $("#adminIpMessage");
+  try {
+    const data = await api("/api/admin/security/ip-allowlist", {
+      method: "POST",
+      body: { allowlist: $("#adminIpAllowlist").value }
+    });
+    message.textContent = data.ipAllowlist.length
+      ? `已保存 ${data.ipAllowlist.length} 条规则。`
+      : "白名单已清空，不再限制管理员 IP。";
+    showToast("IP 白名单已保存", "success");
+    await loadAdminSecurity();
+  } catch (error) {
+    message.textContent = error.message;
+  }
+}
+
+async function adminTotpSetup() {
+  const message = $("#adminTotpMessage");
+  try {
+    const data = await api("/api/admin/security/totp/setup", { method: "POST", body: {} });
+    state.admin.totpSetup = data;
+    $("#adminTotpSetupResult").hidden = false;
+    $("#adminTotpSecret").textContent = data.secret;
+    $("#adminTotpOtpauth").value = data.otpauth;
+    $("#adminTotpEnableForm").hidden = false;
+    message.textContent = "请把密钥加入验证器，然后输入验证码开启。";
+  } catch (error) {
+    message.textContent = error.message;
+  }
+}
+
+async function adminTotpEnable(event) {
+  event.preventDefault();
+  const message = $("#adminTotpMessage");
+  try {
+    await api("/api/admin/security/totp/enable", {
+      method: "POST",
+      body: { code: $("#adminTotpEnableCode").value.trim() }
+    });
+    message.textContent = "两步验证已开启。";
+    showToast("两步验证已开启", "success");
+    $("#adminTotpSetupResult").hidden = true;
+    await loadAdminSecurity();
+  } catch (error) {
+    message.textContent = error.message;
+  }
+}
+
+async function adminTotpDisable(event) {
+  event.preventDefault();
+  const message = $("#adminTotpMessage");
+  try {
+    await api("/api/admin/security/totp/disable", {
+      method: "POST",
+      body: {
+        password: $("#adminTotpDisablePassword").value,
+        code: $("#adminTotpDisableCode").value.trim()
+      }
+    });
+    message.textContent = "两步验证已关闭。";
+    showToast("两步验证已关闭", "success");
+    event.target.reset();
+    await loadAdminSecurity();
+  } catch (error) {
+    message.textContent = error.message;
   }
 }
 
@@ -3213,7 +4122,7 @@ function deliveryStatusLabel(status) {
 }
 
 function deliveryStatusIcon(status) {
-  return { sent: "✓", delivered: "✓✓", read: "✓✓", failed: "!" }[status] || "✓";
+  return { sent: "✓", delivered: "✓", read: "✓✓", failed: "!" }[status] || "✓";
 }
 
 function updateCharCount() {
@@ -3238,13 +4147,19 @@ function bindEvents() {
         method: "POST",
         body: {
           username: $("#loginUsername").value,
-          password: $("#loginPassword").value
+          password: $("#loginPassword").value,
+          totpCode: $("#loginTotp").value
         }
       });
       state.me = data.user;
       $("#loginForm").reset();
+      $("#loginTotpWrap").hidden = true;
       await enterInbox();
     } catch (error) {
+      if (error.data?.totpRequired) {
+        $("#loginTotpWrap").hidden = false;
+        $("#loginTotp").focus();
+      }
       setLoginError(error.message);
     } finally {
       button.disabled = false;
@@ -3341,6 +4256,11 @@ function bindEvents() {
   });
 
   $("#loadMoreBtn").addEventListener("click", loadMoreMessages);
+  $("#messageList").addEventListener("click", event => {
+    const button = event.target.closest("[data-message-action='delete']");
+    if (!button) return;
+    removeMessage(Number(button.dataset.messageId), button.dataset.direction);
+  });
 
   $("#markUnreadBtn").addEventListener("click", markConversationUnread);
   $("#customerBtn").addEventListener("click", () => {
@@ -3499,6 +4419,102 @@ function bindEvents() {
     }
   });
 
+  $("#adminBtn").addEventListener("click", () => openAdminModal());
+  $("#adminClose").addEventListener("click", () => { $("#adminModal").hidden = true; });
+  $("#adminModal").addEventListener("click", event => {
+    if (event.target === $("#adminModal")) $("#adminModal").hidden = true;
+  });
+  $$(".admin-tab").forEach(tab => {
+    tab.addEventListener("click", () => switchAdminTab(tab.dataset.adminTab));
+  });
+  $("#adminSystemRefresh").addEventListener("click", loadAdminSystem);
+  $("#adminOpenTeam").addEventListener("click", () => {
+    $("#adminModal").hidden = true;
+    openTeamModal();
+  });
+  $("#adminUserRows").addEventListener("click", event => {
+    const button = event.target.closest("[data-admin-user-action]");
+    if (!button) return;
+    adminUserAction(button.dataset.adminUserAction, Number(button.dataset.userId));
+  });
+  $("#adminCreateUserForm").addEventListener("submit", adminCreateUser);
+  $("#adminAuditRefresh").addEventListener("click", loadAdminAudit);
+  $("#adminAuditAction").addEventListener("keydown", event => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      loadAdminAudit();
+    }
+  });
+  $("#adminDataRefresh").addEventListener("click", loadAdminData);
+  $("#adminCreateBackup").addEventListener("click", adminCreateBackup);
+  $("#adminExportConversations").addEventListener("click", adminExportConversations);
+  $("#adminCleanupPreview").addEventListener("click", () => adminCleanup(true));
+  $("#adminCleanupForm").addEventListener("submit", event => {
+    event.preventDefault();
+    adminCleanup(false);
+  });
+  $("#adminDiagRefresh").addEventListener("click", loadAdminChannels);
+  $("#adminTelegramTestForm").addEventListener("submit", adminTelegramTest);
+  $("#adminDiagnostics").addEventListener("click", event => {
+    const button = event.target.closest("[data-admin-channel-action]");
+    if (!button) return;
+    const action = button.dataset.adminChannelAction;
+    if (action === "whatsapp-login") {
+      api("/api/admin/whatsapp-web/login", { method: "POST", body: {} })
+        .then(() => loadAdminChannels())
+        .catch(error => showToast(error.message, "error"));
+    } else if (action === "whatsapp-reconnect") {
+      api("/api/admin/whatsapp-web/reconnect", { method: "POST", body: {} })
+        .then(() => { showToast("WhatsApp 个人号已重连", "success"); return loadAdminChannels(); })
+        .catch(error => showToast(error.message, "error"));
+    } else if (action === "whatsapp-logout") {
+      if (!window.confirm("确定退出 WhatsApp 个人号？")) return;
+      api("/api/admin/whatsapp-web/logout", { method: "POST", body: {} })
+        .then(() => loadAdminChannels())
+        .catch(error => showToast(error.message, "error"));
+    }
+  });
+  $("#adminDiagnosticAccounts").addEventListener("click", event => {
+    const button = event.target.closest("[data-admin-account-action]");
+    if (!button) return;
+    adminAccountAction(button.dataset.adminAccountAction, Number(button.dataset.accountId));
+  });
+  $("#adminSecurityRefresh").addEventListener("click", loadAdminSecurity);
+  $("#adminPasswordForm").addEventListener("submit", async event => {
+    event.preventDefault();
+    const message = $("#adminPasswordMessage");
+    const currentPassword = $("#adminCurrentPassword").value;
+    const newPassword = $("#adminNewPassword").value;
+    const confirmPassword = $("#adminConfirmPassword").value;
+    if (newPassword !== confirmPassword) {
+      message.textContent = "两次输入的新密码不一致";
+      return;
+    }
+    try {
+      await api("/api/auth/password", {
+        method: "POST",
+        body: { currentPassword, newPassword }
+      });
+      message.textContent = "密码已修改，其他设备需要重新登录。";
+      event.target.reset();
+      showToast("管理员密码已修改", "success");
+    } catch (error) {
+      message.textContent = error.message;
+    }
+  });
+  $("#adminIpSave").addEventListener("click", adminIpSave);
+  $("#adminTotpSetup").addEventListener("click", adminTotpSetup);
+  $("#adminTotpEnableForm").addEventListener("submit", adminTotpEnable);
+  $("#adminTotpDisableForm").addEventListener("submit", adminTotpDisable);
+  $("#adminTotpCopy").addEventListener("click", async () => {
+    try {
+      await navigator.clipboard.writeText($("#adminTotpOtpauth").value);
+      showToast("otpauth 链接已复制", "success");
+    } catch {
+      $("#adminTotpOtpauth").select();
+    }
+  });
+
   $("#passwordBtn").addEventListener("click", () => {
     $("#passwordModal").hidden = false;
     $("#passwordError").hidden = true;
@@ -3545,6 +4561,7 @@ function bindEvents() {
     if (event.key === "Escape") {
       $("#channelsModal").hidden = true;
       $("#teamModal").hidden = true;
+      $("#adminModal").hidden = true;
       $("#aiModal").hidden = true;
       $("#passwordModal").hidden = true;
       $("#cannedModal").hidden = true;

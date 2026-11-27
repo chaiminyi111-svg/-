@@ -16,20 +16,38 @@ const {
   hashPassword
 } = require("./auth");
 const { audit } = require("./db");
+const { createAdminService } = require("./admin");
+const {
+  generateTotpSecret,
+  verifyTotp,
+  otpauthUrl,
+  getAdminIpAllowlist,
+  setAdminIpAllowlist,
+  parseAllowlist,
+  isIpAllowed
+} = require("./security");
 const {
   getConversationById,
   listConversations,
   getConversationCounts,
   listMessages,
   getMessageById,
+  softDeleteMessage,
   listCannedReplies,
   getCannedReplyById,
   getStats,
+  getTeamDailyStats,
   getLatestAiSuggestion,
   getAiSuggestionById,
   updateAiSuggestionStatus
 } = require("./store");
-const { nowIso, toPublicUser, toConversationSummary, toCannedReply } = require("./util");
+const {
+  nowIso,
+  toPublicUser,
+  toConversationSummary,
+  toPublicMessage,
+  toCannedReply
+} = require("./util");
 const { readSettings, saveSettings } = require("./assignment");
 
 const VERSION = "0.1.0";
@@ -49,6 +67,7 @@ function createApp({ db, config, telegram, whatsapp, whatsappWeb, accounts, broa
   app.set("trust proxy", config.trustProxy ? 1 : false);
 
   const loginAttempts = new Map();
+  const admin = createAdminService({ db, config, logger, telegram, whatsapp, whatsappWeb, accounts });
 
   function loginAllowed(ip) {
     const now = Date.now();
@@ -62,9 +81,12 @@ function createApp({ db, config, telegram, whatsapp, whatsappWeb, accounts, broa
 
   function getUserById(id) {
     return db.prepare(
-      `SELECT id, username, display_name, role, active,
-              ai_allowed, ai_enabled, ai_mode, created_at
-       FROM users WHERE id = ?`
+      `SELECT u.id, u.username, u.display_name, u.role, u.active,
+              u.ai_allowed, u.ai_enabled, u.ai_mode, u.totp_enabled, u.created_at,
+              (SELECT COUNT(*) FROM channel_accounts a WHERE a.owner_id = u.id) AS account_count,
+              (SELECT COUNT(*) FROM conversations c
+                WHERE c.assignee_id = u.id AND c.status != 'closed') AS active_conversation_count
+       FROM users u WHERE u.id = ?`
     ).get(id);
   }
 
@@ -110,12 +132,33 @@ function createApp({ db, config, telegram, whatsapp, whatsappWeb, accounts, broa
   }));
   app.use(attachUser(db));
 
+  app.use((req, res, next) => {
+    if (req.user?.role !== "admin") return next();
+    if (!req.path.startsWith("/api/")) return next();
+    if (["/api/health", "/api/auth/me", "/api/auth/logout", "/api/auth/password"].includes(req.path)) {
+      return next();
+    }
+    const allowlist = getAdminIpAllowlist(db);
+    if (!allowlist.length) return next();
+    let entries;
+    try {
+      entries = parseAllowlist(allowlist.join(","));
+    } catch {
+      return jsonError(res, 500, "管理员 IP 白名单配置无效");
+    }
+    if (entries.length && !isIpAllowed(req.ip, entries)) {
+      return jsonError(res, 403, "当前 IP 不在管理员白名单中");
+    }
+    next();
+  });
+
   const viewerAllowedPaths = new Set([
     "/api/health",
     "/api/auth/me",
     "/api/auth/logout",
     "/api/auth/password",
     "/api/stats",
+    "/api/stats/team-daily",
     "/api/stats/export.csv"
   ]);
   app.use((req, res, next) => {
@@ -189,6 +232,7 @@ function createApp({ db, config, telegram, whatsapp, whatsappWeb, accounts, broa
 
     const username = String(req.body?.username || "").trim().slice(0, 64);
     const password = String(req.body?.password || "").slice(0, 256);
+    const totpCode = String(req.body?.totpCode || "").replace(/\s/g, "").slice(0, 6);
     if (!username || !password) return jsonError(res, 400, "请输入用户名和密码");
 
     const user = db.prepare("SELECT * FROM users WHERE username = ?").get(username);
@@ -196,10 +240,19 @@ function createApp({ db, config, telegram, whatsapp, whatsappWeb, accounts, broa
       return jsonError(res, 401, "用户名或密码错误");
     }
 
+    if (user.totp_enabled) {
+      if (!totpCode) {
+        return res.status(401).json({ error: "请输入两步验证码", totpRequired: true });
+      }
+      if (!verifyTotp(user.totp_secret, totpCode)) {
+        return res.status(401).json({ error: "两步验证码错误", totpRequired: true });
+      }
+    }
+
     loginAttempts.delete(ip);
     const session = createSession(db, user.id, config.sessionDays);
     setSessionCookie(req, res, session.token, config.sessionDays, config);
-    audit(db, user.id, "auth.login", "user", user.id);
+    audit(db, user.id, "auth.login", "user", user.id, totpCode ? JSON.stringify({ totp: true }) : null);
     res.json({ user: toPublicUser(user) });
   });
 
@@ -248,11 +301,14 @@ function createApp({ db, config, telegram, whatsapp, whatsappWeb, accounts, broa
   app.get("/api/users", requireAuth, (req, res) => {
     const includeInactive = req.user.role === "admin" && req.query.includeInactive === "1";
     const rows = db.prepare(
-      `SELECT id, username, display_name, role, active,
-              ai_allowed, ai_enabled, ai_mode, created_at
-       FROM users
-       ${includeInactive ? "" : "WHERE active = 1"}
-       ORDER BY active DESC, role DESC, display_name ASC`
+      `SELECT u.id, u.username, u.display_name, u.role, u.active,
+              u.ai_allowed, u.ai_enabled, u.ai_mode, u.totp_enabled, u.created_at,
+              (SELECT COUNT(*) FROM channel_accounts a WHERE a.owner_id = u.id) AS account_count,
+              (SELECT COUNT(*) FROM conversations c
+                WHERE c.assignee_id = u.id AND c.status != 'closed') AS active_conversation_count
+       FROM users u
+       ${includeInactive ? "" : "WHERE u.active = 1"}
+       ORDER BY u.active DESC, u.role DESC, u.display_name ASC`
     ).all();
     res.json({ users: rows.map(toPublicUser) });
   });
@@ -371,6 +427,18 @@ function createApp({ db, config, telegram, whatsapp, whatsappWeb, accounts, broa
     );
     destroyUserSessions(db, id, target.id === req.user.id ? req.session?.tokenHash || null : null);
     audit(db, req.user.id, "user.password_reset", "user", id);
+    res.json({ ok: true });
+  });
+
+  app.post("/api/users/:id/logout", requireAdmin, (req, res) => {
+    const id = parseId(req.params.id);
+    const target = id ? getUserById(id) : null;
+    if (!target) return jsonError(res, 404, "用户不存在");
+    if (target.id === req.user.id) {
+      return jsonError(res, 400, "不能强制下线当前登录账号");
+    }
+    destroyUserSessions(db, id);
+    audit(db, req.user.id, "user.force_logout", "user", id);
     res.json({ ok: true });
   });
 
@@ -676,6 +744,167 @@ function createApp({ db, config, telegram, whatsapp, whatsappWeb, accounts, broa
     }
   }));
 
+  app.post("/api/admin/whatsapp-web/reconnect", requireAdmin, asyncRoute(async (req, res) => {
+    if (!whatsappWeb) return jsonError(res, 503, "WhatsApp 个人号服务未启动");
+    try {
+      await whatsappWeb.stop();
+      await whatsappWeb.start();
+      audit(db, req.user.id, "whatsapp_web.reconnected", "channel", "whatsapp_web");
+      res.json({ ok: true, whatsappWeb: whatsappWeb.status() });
+    } catch (error) {
+      return jsonError(res, 502, error.message || "重连 WhatsApp 个人号失败");
+    }
+  }));
+
+  app.get("/api/admin/system", requireAdmin, (req, res) => {
+    res.json({ system: admin.systemStatus() });
+  });
+
+  app.get("/api/admin/audit", requireAdmin, (req, res) => {
+    res.json({ audit: admin.listAudit({
+      limit: req.query.limit,
+      offset: req.query.offset,
+      action: req.query.action,
+      userId: req.query.userId
+    }) });
+  });
+
+  app.get("/api/admin/backups", requireAdmin, (req, res) => {
+    res.json({ backups: admin.listBackups() });
+  });
+
+  app.post("/api/admin/backups", requireAdmin, (req, res) => {
+    try {
+      const backup = admin.createBackup();
+      audit(db, req.user.id, "data.backup_created", "backup", backup.name, JSON.stringify({ size: backup.size }));
+      res.status(201).json({ backup });
+    } catch (error) {
+      logger?.error("创建备份失败", error.message);
+      return jsonError(res, 500, "创建备份失败：" + (error.message || "未知错误"));
+    }
+  });
+
+  app.get("/api/admin/backups/:name/download", requireAdmin, (req, res) => {
+    const file = admin.backupPath(req.params.name);
+    if (!file) return jsonError(res, 404, "备份不存在");
+    audit(db, req.user.id, "data.backup_downloaded", "backup", req.params.name);
+    res.download(file, req.params.name);
+  });
+
+  app.get("/api/admin/export/conversations.csv", requireAdmin, (req, res) => {
+    const csv = admin.exportConversationsCsv();
+    audit(db, req.user.id, "data.conversations_exported", "data", "conversations.csv");
+    res.setHeader("content-type", "text/csv; charset=utf-8");
+    res.setHeader("content-disposition", 'attachment; filename="conversations.csv"');
+    res.send(csv);
+  });
+
+  app.post("/api/admin/data/cleanup", requireAdmin, (req, res) => {
+    const dryRun = req.body?.dryRun !== false;
+    if (!dryRun && String(req.body?.confirm || "") !== "CLEANUP") {
+      return jsonError(res, 400, "实际清理需要确认码 CLEANUP");
+    }
+    const result = admin.cleanupOldMessages({
+      days: req.body?.days,
+      dryRun
+    });
+    if (!dryRun) {
+      audit(db, req.user.id, "data.messages_cleaned", "data", "messages", JSON.stringify({
+        days: result.days,
+        deleted: result.deleted
+      }));
+    }
+    res.json({ cleanup: result });
+  });
+
+  app.get("/api/admin/diagnostics", requireAdmin, asyncRoute(async (req, res) => {
+    res.json({ diagnostics: await admin.diagnostics() });
+  }));
+
+  app.post("/api/admin/diagnostics/telegram/test", requireAdmin, asyncRoute(async (req, res) => {
+    const token = String(req.body?.token || "").trim();
+    if (!token) return jsonError(res, 400, "请输入要测试的 Telegram Bot Token");
+    try {
+      const bot = await telegram.validateToken(token);
+      audit(db, req.user.id, "telegram.token_tested", "channel", "telegram", JSON.stringify({
+        botUsername: bot.username || null
+      }));
+      res.json({ ok: true, bot });
+    } catch (error) {
+      const status = error.code === "NETWORK_ERROR" ? 502 : 400;
+      return jsonError(res, status, error.message);
+    }
+  }));
+
+  app.get("/api/admin/security", requireAdmin, (req, res) => {
+    const row = db.prepare("SELECT totp_enabled, totp_secret FROM users WHERE id = ?").get(req.user.id);
+    res.json({
+      security: {
+        ipAllowlist: getAdminIpAllowlist(db),
+        currentIp: req.ip || "",
+        totpEnabled: Boolean(row?.totp_enabled),
+        totpPending: Boolean(row?.totp_secret && !row?.totp_enabled)
+      }
+    });
+  });
+
+  app.post("/api/admin/security/ip-allowlist", requireAdmin, (req, res) => {
+    let entries;
+    try {
+      entries = parseAllowlist(req.body?.allowlist);
+    } catch (error) {
+      return jsonError(res, 400, error.message);
+    }
+    if (entries.length && !isIpAllowed(req.ip, entries)) {
+      return jsonError(res, 400, "当前 IP 不在新白名单中，保存后会把你自己锁在外面");
+    }
+    const saved = setAdminIpAllowlist(db, req.body?.allowlist);
+    audit(db, req.user.id, "security.ip_allowlist_updated", "security", "admin_ip_allowlist", JSON.stringify({ entries: saved }));
+    res.json({ ok: true, ipAllowlist: saved, currentIp: req.ip || "" });
+  });
+
+  app.post("/api/admin/security/totp/setup", requireAdmin, (req, res) => {
+    const row = db.prepare("SELECT totp_enabled FROM users WHERE id = ?").get(req.user.id);
+    if (row?.totp_enabled) return jsonError(res, 400, "两步验证已开启，请先关闭再重新设置");
+    const secret = generateTotpSecret();
+    db.prepare("UPDATE users SET totp_secret = ?, totp_enabled = 0, updated_at = ? WHERE id = ?")
+      .run(secret, nowIso(), req.user.id);
+    audit(db, req.user.id, "security.totp_setup_started", "security", "totp");
+    res.json({
+      secret,
+      otpauth: otpauthUrl({ account: req.user.username, secret }),
+      issuer: "聚合客服台",
+      account: req.user.username
+    });
+  });
+
+  app.post("/api/admin/security/totp/enable", requireAdmin, (req, res) => {
+    const row = db.prepare("SELECT totp_secret, totp_enabled FROM users WHERE id = ?").get(req.user.id);
+    if (!row?.totp_secret) return jsonError(res, 400, "请先生成两步验证密钥");
+    if (row.totp_enabled) return jsonError(res, 400, "两步验证已经开启");
+    if (!verifyTotp(row.totp_secret, req.body?.code)) {
+      return jsonError(res, 400, "验证码错误，请用验证器重新输入");
+    }
+    db.prepare("UPDATE users SET totp_enabled = 1, updated_at = ? WHERE id = ?").run(nowIso(), req.user.id);
+    audit(db, req.user.id, "security.totp_enabled", "security", "totp");
+    res.json({ ok: true });
+  });
+
+  app.post("/api/admin/security/totp/disable", requireAdmin, (req, res) => {
+    const row = db.prepare("SELECT password_hash, totp_secret, totp_enabled FROM users WHERE id = ?").get(req.user.id);
+    if (!row?.totp_enabled) return jsonError(res, 400, "两步验证未开启");
+    if (!verifyPassword(String(req.body?.password || ""), row.password_hash)) {
+      return jsonError(res, 400, "当前密码不正确");
+    }
+    if (!verifyTotp(row.totp_secret, req.body?.code)) {
+      return jsonError(res, 400, "验证码错误");
+    }
+    db.prepare("UPDATE users SET totp_secret = NULL, totp_enabled = 0, updated_at = ? WHERE id = ?")
+      .run(nowIso(), req.user.id);
+    audit(db, req.user.id, "security.totp_disabled", "security", "totp");
+    res.json({ ok: true });
+  });
+
   function accountErrorResponse(res, error) {
     const status = error?.code === "NOT_FOUND" ? 404
       : error?.code === "NOT_CONFIGURED" ? 503
@@ -765,6 +994,33 @@ function createApp({ db, config, telegram, whatsapp, whatsappWeb, accounts, broa
     try {
       const account = await accounts.logout(req.user, id);
       audit(db, req.user.id, "account.logged_out", "channel_account", id);
+      res.json({ account });
+    } catch (error) {
+      return accountErrorResponse(res, error);
+    }
+  }));
+
+  app.post("/api/accounts/:id/relogin", requireAuth, asyncRoute(async (req, res) => {
+    if (!accounts) return jsonError(res, 503, "个人号服务未启动");
+    const id = parseId(req.params.id);
+    if (!id) return jsonError(res, 404, "个人号账号不存在");
+    try {
+      await accounts.logout(req.user, id);
+      const account = await accounts.beginLogin(req.user, id);
+      audit(db, req.user.id, "account.relogin_started", "channel_account", id, account.channel);
+      res.json({ account });
+    } catch (error) {
+      return accountErrorResponse(res, error);
+    }
+  }));
+
+  app.post("/api/accounts/:id/reconnect", requireAuth, asyncRoute(async (req, res) => {
+    if (!accounts) return jsonError(res, 503, "个人号服务未启动");
+    const id = parseId(req.params.id);
+    if (!id) return jsonError(res, 404, "个人号账号不存在");
+    try {
+      const account = await accounts.reconnect(req.user, id);
+      audit(db, req.user.id, "account.reconnected", "channel_account", id, account.channel);
       res.json({ account });
     } catch (error) {
       return accountErrorResponse(res, error);
@@ -901,6 +1157,77 @@ function createApp({ db, config, telegram, whatsapp, whatsappWeb, accounts, broa
               : 502;
       return jsonError(res, status, error.message || "发送消息失败");
     }
+  }));
+
+  app.delete("/api/messages/:id", requireAuth, asyncRoute(async (req, res) => {
+    const messageId = parseId(req.params.id);
+    const message = messageId ? getMessageById(db, messageId) : null;
+    if (!message) return jsonError(res, 404, "消息不存在");
+    const conversation = accessibleConversation(req, message.conversation_id);
+    if (!conversation) return jsonError(res, 404, "消息不存在");
+    if (message.deleted_at) return jsonError(res, 409, "消息已经删除");
+
+    if (message.direction === "out" && req.user.role !== "admin" && message.sender_id !== req.user.id) {
+      return jsonError(res, 403, "只能撤回自己发送的消息");
+    }
+
+    const remoteRequested = req.body?.remote !== false;
+    let remote = false;
+    let warning = "";
+    if (remoteRequested) {
+      const channel = conversation.channel || "telegram";
+      const service = conversation.account_id
+        ? accounts
+        : channel === "whatsapp" ? whatsapp
+          : channel === "whatsapp_web" ? whatsappWeb
+            : channel === "telegram_user" ? accounts
+              : telegram;
+      try {
+        if (!service?.deleteMessage) throw Object.assign(new Error("当前渠道不支持远程撤回"), { code: "NOT_SUPPORTED" });
+        const result = conversation.account_id
+          ? await accounts.deleteMessage(conversation, message)
+          : await service.deleteMessage(conversation, message);
+        remote = Boolean(result?.remote);
+      } catch (error) {
+        warning = error?.message || "远程撤回失败";
+        logger?.warn("远程撤回消息失败", warning);
+      }
+    }
+
+    const updated = softDeleteMessage(db, message.id, {
+      deletedBy: req.user.id,
+      scope: remote ? "remote" : "local",
+      reason: warning || null
+    });
+    const conversationRow = getConversationById(db, conversation.id);
+    const payload = {
+      type: "message.deleted",
+      conversationId: conversation.id,
+      conversation: toConversationSummary(conversationRow),
+      messageId: message.id,
+      direction: message.direction,
+      remote
+    };
+    if (broadcaster) {
+      if (typeof broadcaster === "function") broadcaster(payload);
+      else if (typeof broadcaster.broadcast === "function") broadcaster.broadcast(payload);
+    }
+    audit(
+      db,
+      req.user.id,
+      message.direction === "out" ? "message.recalled" : "message.deleted",
+      "message",
+      message.id,
+      JSON.stringify({ conversationId: conversation.id, remote, warning: warning || undefined })
+    );
+    res.json({
+      ok: true,
+      remote,
+      warning,
+      messageId: message.id,
+      message: toPublicMessage(updated),
+      conversation: payload.conversation
+    });
   }));
 
   app.post("/api/conversations/:id/media", requireAuth, express.raw({
@@ -1064,6 +1391,10 @@ function createApp({ db, config, telegram, whatsapp, whatsappWeb, accounts, broa
 
   app.get("/api/stats", requireAuth, (req, res) => {
     res.json({ stats: getStats(db, req.query.days, { slaFirstResponseMinutes: config.slaFirstResponseMinutes }) });
+  });
+
+  app.get("/api/stats/team-daily", requireAuth, (req, res) => {
+    res.json({ stats: getTeamDailyStats(db, req.query.days) });
   });
 
   app.get("/api/stats/export.csv", requireAuth, (req, res) => {

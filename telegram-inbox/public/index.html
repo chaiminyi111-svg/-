@@ -30,6 +30,10 @@
           密码
           <input id="loginPassword" name="password" type="password" autocomplete="current-password" required>
         </label>
+        <label id="loginTotpWrap" hidden>
+          两步验证码
+          <input id="loginTotp" name="totpCode" inputmode="numeric" autocomplete="one-time-code" maxlength="6" placeholder="6 位验证码">
+        </label>
         <button id="loginButton" class="primary" type="submit">登录</button>
         <div id="loginError" class="form-error" hidden></div>
       </form>
@@ -59,6 +63,7 @@
         <button id="aiBtn" class="ghost" type="button" hidden>AI 助手</button>
         <button id="channelsBtn" class="ghost" type="button" hidden>渠道</button>
         <button id="teamBtn" class="ghost" type="button" hidden>团队</button>
+        <button id="adminBtn" class="ghost" type="button" hidden>管理</button>
         <button id="passwordBtn" class="ghost" type="button">修改密码</button>
         <button id="logoutBtn" class="ghost" type="button">退出</button>
       </div>
@@ -294,6 +299,16 @@
         </div>
       </section>
 
+      <section class="stats-section viewer-table-section">
+        <div class="stats-section-head">
+          <div class="section-label">每日进人 / 有效聊天</div>
+          <span class="viewer-table-hint">同一联系人出现在多个员工名下会标为重复</span>
+        </div>
+        <div id="viewerTeamSummary" class="stats-cards team-summary"></div>
+        <div id="viewerTeamDaily" class="team-daily"></div>
+        <div id="viewerDuplicates" class="duplicate-list"></div>
+      </section>
+
       <p class="viewer-note">此账号只能查看统计数据，不能查看客户会话、消息或修改任何分配。</p>
     </main>
   </section>
@@ -428,6 +443,15 @@
             <tbody id="statsAgentRows"></tbody>
           </table>
         </div>
+      </div>
+      <div class="stats-section">
+        <div class="stats-section-head">
+          <div class="section-label">每日进人 / 有效聊天</div>
+          <span id="teamDailyHint" class="viewer-table-hint"></span>
+        </div>
+        <div id="statsTeamSummary" class="stats-cards team-summary"></div>
+        <div id="statsTeamDaily" class="team-daily"></div>
+        <div id="statsDuplicates" class="duplicate-list"></div>
       </div>
     </div>
   </div>
@@ -859,6 +883,224 @@
         <button class="primary" type="submit">保存新密码</button>
         <div id="passwordError" class="form-error" hidden></div>
       </form>
+    </div>
+  </div>
+
+  <div id="adminModal" class="modal" hidden>
+    <div class="modal-card admin-card" role="dialog" aria-modal="true" aria-labelledby="adminTitle">
+      <header class="modal-head">
+        <div>
+          <h3 id="adminTitle">管理员控制台</h3>
+          <p>系统状态、员工、审计、数据、渠道和安全设置。</p>
+        </div>
+        <button id="adminClose" class="modal-close" type="button" aria-label="关闭">×</button>
+      </header>
+
+      <div class="admin-tabs" role="tablist" aria-label="管理功能">
+        <button class="admin-tab active" type="button" data-admin-tab="overview">系统状态</button>
+        <button class="admin-tab" type="button" data-admin-tab="employees">员工账号</button>
+        <button class="admin-tab" type="button" data-admin-tab="audit">审计日志</button>
+        <button class="admin-tab" type="button" data-admin-tab="data">数据管理</button>
+        <button class="admin-tab" type="button" data-admin-tab="channels">渠道诊断</button>
+        <button class="admin-tab" type="button" data-admin-tab="security">安全设置</button>
+      </div>
+
+      <div class="admin-panels">
+        <section class="admin-panel" data-admin-panel="overview">
+          <div class="admin-toolbar">
+            <div>
+              <h4>系统状态</h4>
+              <p>服务、内存、磁盘、数据库和渠道连接情况。</p>
+            </div>
+            <button id="adminSystemRefresh" class="ghost" type="button">刷新</button>
+          </div>
+          <div id="adminSystemCards" class="stats-cards"></div>
+          <div class="admin-two-col">
+            <div class="admin-block">
+              <h4>个人号在线</h4>
+              <div id="adminAccountSummary" class="admin-kv"></div>
+            </div>
+            <div class="admin-block">
+              <h4>最近错误</h4>
+              <div id="adminRecentErrors" class="admin-log"></div>
+            </div>
+          </div>
+        </section>
+
+        <section class="admin-panel" data-admin-panel="employees" hidden>
+          <div class="admin-toolbar">
+            <div>
+              <h4>员工账号</h4>
+              <p>新建、重置密码、停用/启用、强制下线，并查看个人号绑定数量和当前接待会话。</p>
+            </div>
+            <button id="adminOpenTeam" class="ghost" type="button">完整团队管理</button>
+          </div>
+          <div class="admin-table-wrap">
+            <table class="admin-table">
+              <thead>
+                <tr>
+                  <th>员工</th>
+                  <th>角色</th>
+                  <th>状态</th>
+                  <th>接待中</th>
+                  <th>个人号</th>
+                  <th>两步验证</th>
+                  <th>操作</th>
+                </tr>
+              </thead>
+              <tbody id="adminUserRows"></tbody>
+            </table>
+          </div>
+          <form id="adminCreateUserForm" class="admin-form admin-create-user">
+            <h4>新增员工</h4>
+            <div class="admin-form-grid">
+              <label>用户名<input id="adminNewUsername" required minlength="3" maxlength="32" pattern="[A-Za-z0-9_.-]+"></label>
+              <label>显示名称<input id="adminNewDisplayName" required maxlength="40"></label>
+              <label>初始密码<input id="adminNewPassword" type="password" required minlength="8"></label>
+              <label>角色
+                <select id="adminNewRole">
+                  <option value="agent">客服</option>
+                  <option value="viewer">统计员（只读）</option>
+                  <option value="admin">管理员</option>
+                </select>
+              </label>
+            </div>
+            <button class="primary" type="submit">创建账号</button>
+            <div id="adminUserMessage" class="form-error" hidden></div>
+          </form>
+        </section>
+
+        <section class="admin-panel" data-admin-panel="audit" hidden>
+          <div class="admin-toolbar">
+            <div>
+              <h4>审计日志</h4>
+              <p>登录、账号变更、个人号绑定、导出、备份和渠道配置都会记录。</p>
+            </div>
+            <div class="admin-toolbar-actions">
+              <input id="adminAuditAction" placeholder="筛选动作，例如 auth.login">
+              <button id="adminAuditRefresh" class="ghost" type="button">刷新</button>
+            </div>
+          </div>
+          <div id="adminAuditList" class="admin-audit-list"></div>
+        </section>
+
+        <section class="admin-panel" data-admin-panel="data" hidden>
+          <div class="admin-toolbar">
+            <div>
+              <h4>数据管理</h4>
+              <p>备份数据库、下载备份、导出会话 CSV 和清理旧消息。</p>
+            </div>
+            <button id="adminDataRefresh" class="ghost" type="button">刷新</button>
+          </div>
+          <div id="adminDataSummary" class="admin-kv"></div>
+          <div class="admin-actions">
+            <button id="adminCreateBackup" class="primary" type="button">立即备份</button>
+            <button id="adminExportConversations" class="ghost" type="button">导出会话 CSV</button>
+          </div>
+          <div class="admin-block">
+            <h4>已有备份</h4>
+            <div id="adminBackupList" class="admin-backup-list"></div>
+          </div>
+          <form id="adminCleanupForm" class="admin-form">
+            <h4>清理旧消息</h4>
+            <p class="channel-note">先预览，确认后再真正删除。会话本身会保留。</p>
+            <div class="admin-form-grid">
+              <label>保留最近多少天<input id="adminCleanupDays" type="number" min="1" max="3650" value="30" required></label>
+              <label>确认码（实际清理时输入 CLEANUP）<input id="adminCleanupConfirm" placeholder="CLEANUP"></label>
+            </div>
+            <div class="admin-actions">
+              <button id="adminCleanupPreview" class="ghost" type="button">预览数量</button>
+              <button class="danger" type="submit">实际清理</button>
+            </div>
+            <div id="adminCleanupResult" class="channel-note"></div>
+          </form>
+        </section>
+
+        <section class="admin-panel" data-admin-panel="channels" hidden>
+          <div class="admin-toolbar">
+            <div>
+              <h4>渠道诊断</h4>
+              <p>查看 Telegram、WhatsApp 和个人号连接状态、最近错误，并重连账号。</p>
+            </div>
+            <button id="adminDiagRefresh" class="ghost" type="button">刷新</button>
+          </div>
+          <div id="adminDiagnostics" class="admin-diag"></div>
+          <form id="adminTelegramTestForm" class="admin-form">
+            <h4>测试 Telegram Bot Token</h4>
+            <div class="admin-inline">
+              <input id="adminTelegramTestToken" type="password" placeholder="只测试，不保存">
+              <button class="primary" type="submit">测试</button>
+            </div>
+            <div id="adminTelegramTestResult" class="channel-note"></div>
+          </form>
+          <div class="admin-block">
+            <h4>个人号账号</h4>
+            <div id="adminDiagnosticAccounts" class="admin-account-list"></div>
+          </div>
+        </section>
+
+        <section class="admin-panel" data-admin-panel="security" hidden>
+          <div class="admin-toolbar">
+            <div>
+              <h4>安全设置</h4>
+              <p>修改管理员密码、IP 白名单和两步验证。白名单只限制管理员接口。</p>
+            </div>
+            <button id="adminSecurityRefresh" class="ghost" type="button">刷新</button>
+          </div>
+
+          <div class="admin-block">
+            <h4>修改管理员密码</h4>
+            <p class="channel-note">修改后其他设备上的登录会失效，当前设备保持登录。</p>
+            <form id="adminPasswordForm" class="admin-form">
+              <div class="admin-form-grid">
+                <label>当前密码<input id="adminCurrentPassword" type="password" autocomplete="current-password" required></label>
+                <label>新密码<input id="adminNewPassword" type="password" autocomplete="new-password" minlength="8" required></label>
+                <label>确认新密码<input id="adminConfirmPassword" type="password" autocomplete="new-password" minlength="8" required></label>
+              </div>
+              <div class="admin-actions">
+                <button class="primary" type="submit">修改密码</button>
+              </div>
+              <div id="adminPasswordMessage" class="channel-note"></div>
+            </form>
+          </div>
+
+          <div class="admin-block">
+            <h4>管理员 IP 白名单</h4>
+            <p class="channel-note">留空表示不限制。支持 IPv4、IPv6 和 CIDR，每行一个或用逗号分隔。当前 IP：<code id="adminCurrentIp">—</code></p>
+            <textarea id="adminIpAllowlist" rows="4" placeholder="例如：&#10;127.0.0.1&#10;10.0.0.0/8"></textarea>
+            <div class="admin-actions">
+              <button id="adminIpSave" class="primary" type="button">保存白名单</button>
+            </div>
+            <div id="adminIpMessage" class="channel-note"></div>
+          </div>
+
+          <div class="admin-block">
+            <h4>两步验证（TOTP）</h4>
+            <div id="adminTotpStatus" class="channel-note"></div>
+            <div class="admin-actions">
+              <button id="adminTotpSetup" class="ghost" type="button">生成新密钥</button>
+            </div>
+            <div id="adminTotpSetupResult" class="admin-totp-result" hidden>
+              <p>在验证器 App 中手动添加以下密钥，或打开 otpauth 链接：</p>
+              <code id="adminTotpSecret"></code>
+              <div class="admin-inline">
+                <input id="adminTotpOtpauth" readonly>
+                <button id="adminTotpCopy" class="ghost" type="button">复制链接</button>
+              </div>
+            </div>
+            <form id="adminTotpEnableForm" class="admin-form admin-inline" hidden>
+              <input id="adminTotpEnableCode" inputmode="numeric" maxlength="6" placeholder="输入 6 位验证码">
+              <button class="primary" type="submit">开启两步验证</button>
+            </form>
+            <form id="adminTotpDisableForm" class="admin-form admin-inline" hidden>
+              <input id="adminTotpDisablePassword" type="password" placeholder="当前密码">
+              <input id="adminTotpDisableCode" inputmode="numeric" maxlength="6" placeholder="6 位验证码">
+              <button class="danger" type="submit">关闭两步验证</button>
+            </form>
+            <div id="adminTotpMessage" class="channel-note"></div>
+          </div>
+        </section>
+      </div>
     </div>
   </div>
 

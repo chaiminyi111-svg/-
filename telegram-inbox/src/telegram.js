@@ -142,6 +142,13 @@ class TelegramClient {
     return this.requestMultipart(method, form);
   }
 
+  deleteMessage(chatId, messageId) {
+    return this.request("deleteMessage", {
+      chat_id: String(chatId),
+      message_id: Number(messageId)
+    });
+  }
+
   getFile(fileId) {
     return this.request("getFile", { file_id: fileId });
   }
@@ -549,6 +556,17 @@ function createTelegramService({ db, config, logger, broadcaster, translate, hoo
     return { message, conversation: summary };
   }
 
+  async function deleteMessage(conversation, message) {
+    if (!client.configured) {
+      throw new TelegramError("未配置 TELEGRAM_BOT_TOKEN，暂时无法撤回消息", "NOT_CONFIGURED");
+    }
+    if (!message?.telegram_message_id) {
+      throw new TelegramError("这条消息缺少 Telegram 消息 ID，无法撤回", "INVALID_INPUT");
+    }
+    await client.deleteMessage(conversation.telegram_chat_id, message.telegram_message_id);
+    return { remote: true };
+  }
+
   async function sendMedia(conversation, file, user) {
     if (!client.configured) {
       throw new TelegramError("未配置 TELEGRAM_BOT_TOKEN，暂时无法发送附件", "NOT_CONFIGURED");
@@ -775,6 +793,7 @@ function createTelegramService({ db, config, logger, broadcaster, translate, hoo
     ingestUpdate,
     sendReply,
     sendMedia,
+    deleteMessage,
     getMedia
   };
 }

@@ -190,6 +190,34 @@ test("WhatsApp Web QR login, inbound text, outbound reply and logout", async () 
     assert.equal(outbound.delivery_status, "sent");
     assert.ok(ctx.events.some(event => event.type === "message.created"));
 
+    const updateHandler = ctx.fake.handlers.get("messages.update");
+    assert.equal(typeof updateHandler, "function");
+    const receiptKey = {
+      remoteJid: "8613800000000@s.whatsapp.net",
+      fromMe: true,
+      id: outbound.telegram_message_id
+    };
+    updateHandler([{ key: receiptKey, update: { status: 3, messageTimestamp: Math.floor(Date.now() / 1000) } }]);
+    await flush();
+    assert.equal(
+      ctx.db.prepare("SELECT delivery_status FROM messages WHERE id = ?").get(outbound.id).delivery_status,
+      "delivered"
+    );
+    updateHandler([{ key: receiptKey, update: { status: 4, messageTimestamp: Math.floor(Date.now() / 1000) } }]);
+    await flush();
+    assert.equal(
+      ctx.db.prepare("SELECT delivery_status FROM messages WHERE id = ?").get(outbound.id).delivery_status,
+      "read"
+    );
+    assert.ok(ctx.events.some(event => event.type === "message.status"));
+
+    const recalled = await ctx.service.deleteMessage(
+      getConversationById(ctx.db, conversation.id),
+      outbound
+    );
+    assert.equal(recalled.remote, true);
+    assert.equal(ctx.fake.sent.at(-1).content.delete.id, outbound.telegram_message_id);
+
     fs.mkdirSync(ctx.config.whatsappWebSessionPath, { recursive: true });
     fs.writeFileSync(path.join(ctx.config.whatsappWebSessionPath, "creds.json"), "{}");
     const afterLogout = await ctx.service.logout();

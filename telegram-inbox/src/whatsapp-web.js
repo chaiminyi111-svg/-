@@ -277,6 +277,51 @@ function createWhatsAppWebService({
     }
   }
 
+  const DELIVERY_RANK = { sent: 1, delivered: 2, read: 4 };
+
+  function deliveryStatusFromUpdate(status) {
+    const value = Number(status);
+    if (value >= 4) return "read";
+    if (value >= 2) return "delivered";
+    return null;
+  }
+
+  function updateDeliveryStatus(key, update) {
+    if (!key?.fromMe || !key.id) return false;
+    const next = deliveryStatusFromUpdate(update?.status);
+    if (!next) return false;
+    const row = db.prepare(
+      "SELECT * FROM messages WHERE telegram_message_id = ? AND direction = 'out'"
+    ).get(String(key.id));
+    if (!row) return false;
+    if ((DELIVERY_RANK[row.delivery_status] || 0) >= DELIVERY_RANK[next]) return false;
+    const timestamp = Number(update?.messageTimestamp)
+      ? new Date(Number(update.messageTimestamp) * 1000).toISOString()
+      : nowIso();
+    db.prepare(
+      "UPDATE messages SET delivery_status = ?, delivery_updated_at = ? WHERE id = ?"
+    ).run(next, timestamp, row.id);
+    const updated = db.prepare("SELECT * FROM messages WHERE id = ?").get(row.id);
+    const conversationRow = getConversationById(db, row.conversation_id);
+    emit({
+      type: "message.status",
+      conversation: toConversationSummary(conversationRow),
+      message: toPublicMessage(updated)
+    });
+    return true;
+  }
+
+  async function handleMessagesUpdate(event) {
+    const updates = Array.isArray(event) ? event : Array.isArray(event?.updates) ? event.updates : [];
+    for (const item of updates) {
+      try {
+        updateDeliveryStatus(item?.key, item?.update || {});
+      } catch (error) {
+        logger?.warn("WhatsApp 个人号更新回执失败", error?.message || String(error));
+      }
+    }
+  }
+
   async function connect() {
     if (!enabled) {
       throw new WhatsAppWebError("WhatsApp 个人号未启用，请设置 WHATSAPP_WEB_ENABLED=true", "NOT_CONFIGURED");
@@ -332,6 +377,11 @@ function createWhatsAppWebService({
       socket.ev.on("messages.upsert", event => {
         handleMessagesUpsert(event).catch(error => {
           logger?.warn("WhatsApp 个人号消息事件处理失败", error?.message || String(error));
+        });
+      });
+      socket.ev.on("messages.update", event => {
+        handleMessagesUpdate(event).catch(error => {
+          logger?.warn("WhatsApp 个人号回执事件处理失败", error?.message || String(error));
         });
       });
 
@@ -625,6 +675,31 @@ function createWhatsAppWebService({
     return { message, conversation: summary };
   }
 
+  async function deleteMessage(conversation, message) {
+    if (!running || !socket) {
+      throw new WhatsAppWebError(
+        "WhatsApp 个人号未连接，请管理员在「渠道」中扫码登录",
+        "NOT_CONFIGURED"
+      );
+    }
+    const rawChatId = String(conversation.telegram_chat_id || "");
+    const jid = (accountId ? rawChatId.replace(`waweb:${accountId}:`, "") : rawChatId.replace(/^waweb:/, ""));
+    if (!isPrivateJid(jid)) {
+      throw new WhatsAppWebError("暂不支持撤回该 WhatsApp 会话的消息", "INVALID_INPUT");
+    }
+    if (!message?.telegram_message_id) {
+      throw new WhatsAppWebError("这条消息缺少 WhatsApp 消息 ID，无法撤回", "INVALID_INPUT");
+    }
+    await socket.sendMessage(jid, {
+      delete: {
+        remoteJid: jid,
+        fromMe: message.direction === "out",
+        id: String(message.telegram_message_id)
+      }
+    });
+    return { remote: true };
+  }
+
   function status() {
     return {
       enabled,
@@ -651,6 +726,7 @@ function createWhatsAppWebService({
     beginLogin,
     logout,
     sendReply,
+    deleteMessage,
     ingestMessage,
     status
   };

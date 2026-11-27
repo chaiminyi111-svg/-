@@ -146,8 +146,18 @@ test("account login status and replies are delegated to the account service", as
       calls.push("logout");
       this.running = false;
     },
-    async start() {},
-    async stop() {}
+    async start() {
+      calls.push("start");
+      this.running = true;
+    },
+    async stop() {
+      calls.push("stop");
+      this.running = false;
+    },
+    async deleteMessage(conversation, message) {
+      calls.push(["deleteMessage", conversation.id, message.id]);
+      return { remote: true };
+    }
   };
 
   const accounts = createAccountsService({
@@ -176,9 +186,17 @@ test("account login status and replies are delegated to the account service", as
   assert.equal(result.message.body, "收到");
   assert.deepEqual(calls[1], ["sendReply", 42, "收到", ctx.alice.id]);
 
+  const deleted = await accounts.deleteMessage(conversation, { id: 7 });
+  assert.equal(deleted.remote, true);
+  assert.deepEqual(calls.at(-1), ["deleteMessage", 42, 7]);
+
+  const reconnected = await accounts.reconnect(ctx.alice, row.id);
+  assert.equal(reconnected.status.running, true);
+  assert.deepEqual(calls.slice(-2), ["stop", "start"]);
+
   await accounts.logout(ctx.alice, row.id);
   assert.equal(accounts.get(ctx.alice, row.id).status.running, false);
-  assert.deepEqual(calls.slice(2), ["logout"]);
+  assert.equal(calls.at(-1), "logout");
 });
 
 test("deleting an account with conversations is rejected", async t => {

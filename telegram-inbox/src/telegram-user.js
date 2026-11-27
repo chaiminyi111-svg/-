@@ -417,6 +417,25 @@ function createTelegramUserService({
     return { message, conversation: summary };
   }
 
+  async function deleteMessage(conversation, message) {
+    if (!running || !client) {
+      throw new TelegramUserError("Telegram 个人号未登录，请先扫码登录", "NOT_CONFIGURED");
+    }
+    const rawId = Number(message?.telegram_message_id);
+    if (!Number.isFinite(rawId) || rawId <= 0) {
+      throw new TelegramUserError("这条消息缺少 Telegram 消息 ID，无法撤回", "INVALID_INPUT");
+    }
+    const entity = await resolveEntity(conversation);
+    if (typeof client.deleteMessages === "function") {
+      await client.deleteMessages(entity, [rawId], { revoke: true });
+    } else if (client.api?.messages?.deleteMessages) {
+      await client.api.messages.deleteMessages({ id: [rawId], revoke: true });
+    } else {
+      throw new TelegramUserError("当前 Telegram 个人号客户端不支持撤回", "NOT_SUPPORTED");
+    }
+    return { remote: true };
+  }
+
   function clearLoginTimer() {
     if (loginTimer) {
       clearTimeout(loginTimer);
@@ -632,6 +651,7 @@ function createTelegramUserService({
     submitPassword,
     logout,
     sendReply,
+    deleteMessage,
     status,
     ingestMessage
   };
