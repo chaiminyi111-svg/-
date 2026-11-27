@@ -301,6 +301,7 @@ function showInbox() {
   $("#channelsBtn").hidden = state.me.role !== "admin";
   $("#teamBtn").hidden = state.me.role !== "admin";
   $("#adminBtn").hidden = state.me.role !== "admin";
+  $("#passwordBtn").hidden = state.me.role === "admin";
   $("#personalAccountsBtn").hidden = state.me.role === "viewer" || !state.personal.enabled;
   $("#modeSwitch").hidden = state.me.role === "viewer" || !state.personal.enabled;
   $("#aiBtn").hidden = state.me.role === "viewer";
