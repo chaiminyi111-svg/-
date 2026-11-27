@@ -110,8 +110,7 @@ if [[ -f "$ENV_FILE" ]]; then
   log "检测到已有 .env，保留现有配置"
 else
   log "写入 $ENV_FILE"
-  umask 077
-  cat > "$ENV_FILE" <<EOF
+  (umask 077; cat > "$ENV_FILE" <<EOF
 PORT=${PORT}
 HOST=0.0.0.0
 DATA_DIR="$(env_quote "$APP_DIR/data")"
@@ -138,6 +137,7 @@ TELEGRAM_USER_API_ID="$(env_quote "$TELEGRAM_USER_API_ID")"
 TELEGRAM_USER_API_HASH="$(env_quote "$TELEGRAM_USER_API_HASH")"
 TELEGRAM_USER_SESSION_PATH="$(env_quote "$APP_DIR/data/telegram-user")"
 EOF
+  )
   chmod 600 "$ENV_FILE"
 fi
 
@@ -157,6 +157,7 @@ if [[ -f package-lock.json ]]; then
 else
   npm install --omit=dev
 fi
+chmod -R a+rX node_modules
 
 NODE_BIN="$(command -v node)"
 log "写入 systemd 服务：$SERVICE_NAME"
