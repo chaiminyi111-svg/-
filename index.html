@@ -1152,6 +1152,9 @@
         if (!AudioCtor) return null;
         try {
           audioContext = new AudioCtor();
+          if (audioContext.state === "suspended") {
+            audioContext.resume().catch(function () {});
+          }
         } catch (error) {
           audioContext = null;
         }
