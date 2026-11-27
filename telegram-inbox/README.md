@@ -66,6 +66,7 @@ telegram-inbox/
 │   ├── backup.js          # SQLite 一致性备份
 │   └── check-telegram.js  # 校验真实 Bot Token
 ├── public/                # 中文工作台前端
+├── deploy/                # 阿里云/Ubuntu 一键部署、Nginx、systemd、备份
 ├── test/app.test.js       # 使用 mock Telegram / WhatsApp 的端到端 API 测试
 ├── test/accounts.test.js  # 个人号账号、模式过滤与发送路由测试
 ├── Dockerfile
@@ -273,6 +274,19 @@ ollama serve
 ```
 
 然后在「渠道 → AI 自动回复」选择「本地 Ollama（无需 Key）」，模型填 `qwen2.5:3b`，保存并测试连接。Docker 部署时，把地址改成 `http://host.docker.internal:11434/v1`，并让 Ollama 监听 `0.0.0.0`。
+
+## 阿里云一键部署
+
+如果使用阿里云轻量应用服务器或 ECS，推荐选择 **中国香港 / 新加坡 / 日本** 地域和 Ubuntu 24.04，然后：
+
+```bash
+cd /opt/telegram-inbox
+sudo bash deploy/setup.sh
+```
+
+脚本会自动安装 Node.js、Nginx，创建 `.env`、systemd 服务和反向代理，可选申请 HTTPS 证书。详细步骤见 [deploy/README.md](deploy/README.md)。
+
+> 中国大陆地域通常无法稳定访问 Telegram / WhatsApp，不建议用于本项目的正式部署。
 
 ## Docker 部署
 
