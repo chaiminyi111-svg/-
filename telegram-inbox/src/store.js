@@ -211,48 +211,62 @@ function getStats(db, days = 7, options = {}) {
     now.getUTCDate() - (rangeDays - 1)
   ));
   const startIso = startDate.toISOString();
-  const counts = getConversationCounts(db);
+  const scopeUserId = options.userId ? Number(options.userId) : null;
+  const counts = getConversationCounts(db, scopeUserId ? { isAdmin: false, userId: scopeUserId } : {});
+  const scopeParams = scopeUserId ? [scopeUserId] : [];
 
   const messageTotals = db.prepare(
-    `SELECT SUM(CASE WHEN direction = 'in' THEN 1 ELSE 0 END) AS inbound,
-            SUM(CASE WHEN direction = 'out' THEN 1 ELSE 0 END) AS outbound
-     FROM messages WHERE created_at >= ? AND deleted_at IS NULL`
-  ).get(startIso);
+    `SELECT SUM(CASE WHEN m.direction = 'in' THEN 1 ELSE 0 END) AS inbound,
+            SUM(CASE WHEN m.direction = 'out' THEN 1 ELSE 0 END) AS outbound
+     FROM messages m
+     JOIN conversations c ON c.id = m.conversation_id
+     WHERE m.created_at >= ? AND m.deleted_at IS NULL${scopeUserId ? " AND c.assignee_id = ?" : ""}`
+  ).get(startIso, ...scopeParams);
 
   const newConversations = Number(
-    db.prepare("SELECT COUNT(*) AS c FROM conversations WHERE created_at >= ?").get(startIso).c
+    db.prepare(
+      `SELECT COUNT(*) AS c FROM conversations
+       WHERE created_at >= ?${scopeUserId ? " AND assignee_id = ?" : ""}`
+    ).get(startIso, ...scopeParams).c
   );
   const assignedTotals = db.prepare(
-    "SELECT COUNT(*) AS assigned FROM conversations WHERE assignee_id IS NOT NULL"
-  ).get();
+    `SELECT COUNT(*) AS assigned FROM conversations
+     WHERE assignee_id IS NOT NULL${scopeUserId ? " AND assignee_id = ?" : ""}`
+  ).get(...scopeParams);
   const totalUnread = Number(
-    db.prepare("SELECT COALESCE(SUM(unread_count), 0) AS unread FROM conversations").get().unread || 0
+    db.prepare(
+      `SELECT COALESCE(SUM(unread_count), 0) AS unread FROM conversations
+       ${scopeUserId ? "WHERE assignee_id = ?" : ""}`
+    ).get(...scopeParams).unread || 0
   );
   const unanswered = Number(
     db.prepare(
       `SELECT COUNT(*) AS c FROM conversations
-       WHERE status != 'closed' AND last_message_direction = 'in'`
-    ).get().c || 0
+       WHERE status != 'closed' AND last_message_direction = 'in'${scopeUserId ? " AND assignee_id = ?" : ""}`
+    ).get(...scopeParams).c || 0
   );
   const newAssigned = Number(
     db.prepare(
       `SELECT COUNT(*) AS c FROM conversations
-       WHERE assignee_id IS NOT NULL AND assigned_at >= ?`
-    ).get(startIso).c
+       WHERE assignee_id IS NOT NULL AND assigned_at >= ?${scopeUserId ? " AND assignee_id = ?" : ""}`
+    ).get(startIso, ...scopeParams).c
   );
 
   const dailyRows = db.prepare(
-    `SELECT substr(created_at, 1, 10) AS day,
-            SUM(CASE WHEN direction = 'in' THEN 1 ELSE 0 END) AS inbound,
-            SUM(CASE WHEN direction = 'out' THEN 1 ELSE 0 END) AS outbound
-     FROM messages
-     WHERE created_at >= ? AND deleted_at IS NULL
+    `SELECT substr(m.created_at, 1, 10) AS day,
+            SUM(CASE WHEN m.direction = 'in' THEN 1 ELSE 0 END) AS inbound,
+            SUM(CASE WHEN m.direction = 'out' THEN 1 ELSE 0 END) AS outbound
+     FROM messages m
+     JOIN conversations c ON c.id = m.conversation_id
+     WHERE m.created_at >= ? AND m.deleted_at IS NULL${scopeUserId ? " AND c.assignee_id = ?" : ""}
      GROUP BY day`
-  ).all(startIso);
+  ).all(startIso, ...scopeParams);
   const newRows = db.prepare(
     `SELECT substr(created_at, 1, 10) AS day, COUNT(*) AS c
-     FROM conversations WHERE created_at >= ? GROUP BY day`
-  ).all(startIso);
+     FROM conversations
+     WHERE created_at >= ?${scopeUserId ? " AND assignee_id = ?" : ""}
+     GROUP BY day`
+  ).all(startIso, ...scopeParams);
   const dailyMap = new Map();
   for (const row of dailyRows) {
     dailyMap.set(row.day, {
@@ -281,9 +295,9 @@ function getStats(db, days = 7, options = {}) {
       `SELECT sender_id, COUNT(*) AS c
        FROM messages
        WHERE direction = 'out' AND sender_id IS NOT NULL AND created_at >= ?
-         AND deleted_at IS NULL
+         AND deleted_at IS NULL${scopeUserId ? " AND sender_id = ?" : ""}
        GROUP BY sender_id`
-    ).all(startIso).map(row => [row.sender_id, Number(row.c || 0)])
+    ).all(startIso, ...scopeParams).map(row => [row.sender_id, Number(row.c || 0)])
   );
 
   const slaTargetMinutes = Math.max(Number(options.slaFirstResponseMinutes) || 15, 1);
@@ -301,9 +315,9 @@ function getStats(db, days = 7, options = {}) {
                 THEN 1 ELSE 0 END) AS sla_breaches,
             COUNT(*) AS assigned_in_range
      FROM conversations
-     WHERE assignee_id IS NOT NULL AND created_at >= ?
+     WHERE assignee_id IS NOT NULL AND created_at >= ?${scopeUserId ? " AND assignee_id = ?" : ""}
      GROUP BY assignee_id`
-  ).all(slaTargetMinutes, slaTargetMinutes, startIso);
+  ).all(slaTargetMinutes, slaTargetMinutes, startIso, ...scopeParams);
   const responseByAgent = new Map(responseRows.map(row => [row.assignee_id, row]));
   const responseTotals = db.prepare(
     `SELECT AVG(CASE WHEN first_response_at IS NOT NULL
@@ -318,8 +332,8 @@ function getStats(db, days = 7, options = {}) {
                 THEN 1 ELSE 0 END) AS sla_breaches,
             COUNT(*) AS assigned_in_range
      FROM conversations
-     WHERE assignee_id IS NOT NULL AND created_at >= ?`
-  ).get(slaTargetMinutes, slaTargetMinutes, startIso);
+     WHERE assignee_id IS NOT NULL AND created_at >= ?${scopeUserId ? " AND assignee_id = ?" : ""}`
+  ).get(slaTargetMinutes, slaTargetMinutes, startIso, ...scopeParams);
 
   const agents = db.prepare(
     `SELECT u.id, u.username, u.display_name, u.role,
@@ -338,10 +352,10 @@ function getStats(db, days = 7, options = {}) {
                AND w.last_message_direction = 'in') AS unanswered
      FROM users u
      LEFT JOIN conversations c ON c.assignee_id = u.id
-     WHERE u.active = 1 AND u.role IN ('admin', 'agent')
+     WHERE u.active = 1 AND u.role IN ('admin', 'agent')${scopeUserId ? " AND u.id = ?" : ""}
      GROUP BY u.id
      ORDER BY assigned DESC, u.display_name ASC`
-  ).all(startIso, startIso).map(row => ({
+  ).all(startIso, startIso, ...scopeParams).map(row => ({
     id: row.id,
     username: row.username,
     displayName: row.display_name,
@@ -397,8 +411,10 @@ function getStats(db, days = 7, options = {}) {
   };
 }
 
-function getTeamDailyStats(db, days = 7) {
+function getTeamDailyStats(db, days = 7, options = {}) {
   const rangeDays = Math.min(Math.max(Number.parseInt(days, 10) || 7, 1), 30);
+  const scopeUserId = options.userId ? Number(options.userId) : null;
+  const scopeParams = scopeUserId ? [scopeUserId] : [];
   const now = new Date();
   const startDate = new Date(Date.UTC(
     now.getUTCFullYear(),
@@ -410,9 +426,9 @@ function getTeamDailyStats(db, days = 7) {
   const users = db.prepare(
     `SELECT id, username, display_name, role
      FROM users
-     WHERE active = 1 AND role IN ('admin', 'agent')
+     WHERE active = 1 AND role IN ('admin', 'agent')${scopeUserId ? " AND id = ?" : ""}
      ORDER BY display_name ASC, id ASC`
-  ).all().map(row => ({
+  ).all(...scopeParams).map(row => ({
     id: row.id,
     username: row.username,
     displayName: row.display_name,
@@ -430,8 +446,8 @@ function getTeamDailyStats(db, days = 7) {
     `SELECT c.id AS conversation_id, c.assignee_id, c.username, c.title,
             c.channel, c.account_id, substr(c.created_at, 1, 10) AS day
      FROM conversations c
-     WHERE c.created_at >= ? AND c.assignee_id IS NOT NULL`
-  ).all(startIso);
+     WHERE c.created_at >= ? AND c.assignee_id IS NOT NULL${scopeUserId ? " AND c.assignee_id = ?" : ""}`
+  ).all(startIso, ...scopeParams);
 
   const effectiveRows = db.prepare(
     `SELECT c.id AS conversation_id, c.assignee_id, c.username, c.title,
@@ -441,10 +457,10 @@ function getTeamDailyStats(db, days = 7) {
             SUM(CASE WHEN m.direction = 'out' THEN 1 ELSE 0 END) AS outbound_count
      FROM messages m
      JOIN conversations c ON c.id = m.conversation_id
-     WHERE m.created_at >= ? AND c.assignee_id IS NOT NULL AND m.deleted_at IS NULL
+     WHERE m.created_at >= ? AND c.assignee_id IS NOT NULL AND m.deleted_at IS NULL${scopeUserId ? " AND c.assignee_id = ?" : ""}
      GROUP BY c.id, substr(m.created_at, 1, 10)
      HAVING SUM(CASE WHEN m.direction = 'in' THEN 1 ELSE 0 END) >= 1`
-  ).all(startIso);
+  ).all(startIso, ...scopeParams);
 
   const messageRows = db.prepare(
     `SELECT c.assignee_id, substr(m.created_at, 1, 10) AS day,
@@ -452,9 +468,9 @@ function getTeamDailyStats(db, days = 7) {
             SUM(CASE WHEN m.direction = 'out' THEN 1 ELSE 0 END) AS outbound
      FROM messages m
      JOIN conversations c ON c.id = m.conversation_id
-     WHERE m.created_at >= ? AND c.assignee_id IS NOT NULL AND m.deleted_at IS NULL
+     WHERE m.created_at >= ? AND c.assignee_id IS NOT NULL AND m.deleted_at IS NULL${scopeUserId ? " AND c.assignee_id = ?" : ""}
      GROUP BY c.assignee_id, substr(m.created_at, 1, 10)`
-  ).all(startIso);
+  ).all(startIso, ...scopeParams);
 
   const daysList = [];
   for (let index = 0; index < rangeDays; index += 1) {

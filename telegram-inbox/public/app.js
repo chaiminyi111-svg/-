@@ -257,7 +257,7 @@ async function enterInbox() {
     return;
   }
   showInbox();
-  await loadUsers();
+  if (state.me.role === "admin") await loadUsers();
   await loadTranslateConfig();
   await loadAiPreferences();
   await loadConversations();
@@ -1815,6 +1815,16 @@ function renderSidebarStats() {
 
 /* ---------- Stats ---------- */
 async function openStatsModal() {
+  const isAdmin = state.me.role === "admin";
+  $("#statsTitle").textContent = isAdmin ? "统计看板" : "我的数据";
+  $("#statsSubtitle").textContent = isAdmin
+    ? "会话、消息和客服工作量概览。"
+    : "仅显示分配给我的会话和消息。";
+  $("#statsWorkloadLabel").textContent = isAdmin ? "客服工作量" : "我的工作量";
+  $("#statsDailyLabel").textContent = isAdmin ? "每日进人 / 有效聊天" : "我的每日进人 / 有效聊天";
+  $("#statsExport").textContent = isAdmin ? "导出 CSV" : "导出我的 CSV";
+  $("#statsTeamSummary").hidden = !isAdmin;
+  $("#statsDuplicates").hidden = !isAdmin;
   $("#statsModal").hidden = false;
   $("#statsRange").value = String(state.statsDays || 7);
   await loadStats();
@@ -1879,6 +1889,7 @@ function renderStats() {
   if (!stats) return;
   const totals = stats.totals;
 
+  const isAdmin = state.me.role === "admin";
   const cards = [
     ["区间进人", totals.newConversations, rangeLabel(stats.rangeDays)],
     ["新分配", totals.newAssigned, "管理员分配"],
@@ -1893,7 +1904,7 @@ function renderStats() {
     ["SLA 超时", totals.slaBreaches, "需要优先处理"],
     ["SLA 达标率", `${totals.slaComplianceRate ?? 100}%`, "区间内新分配会话"],
     ["未回复会话", totals.unanswered, "最后一条是客户消息"]
-  ];
+  ].filter(([label]) => isAdmin || label !== "未分配");
 
   for (const cardBox of [$("#statsCards"), $("#viewerCards")]) {
     if (!cardBox) continue;
@@ -2024,7 +2035,7 @@ function renderTeamDaily() {
   const data = state.teamDaily;
   if (!data) return;
   const hint = $("#teamDailyHint");
-  if (hint) hint.textContent = data.definition || "";
+  if (hint) hint.textContent = state.me.role === "agent" ? "仅统计我的会话" : (data.definition || "");
   renderTeamSummary(data);
 
   for (const [tableId, duplicateId] of [
@@ -2067,7 +2078,8 @@ function renderTeamDaily() {
       dateCell.textContent = day.date.slice(5).replace("-", "/");
       if (day.team) {
         const teamLine = document.createElement("small");
-        teamLine.textContent = `团队 进${day.team.newContacts} · 有效${day.team.effectiveContacts} · 重复${day.team.duplicateContacts}`;
+        const teamPrefix = state.me.role === "agent" ? "我" : "团队";
+        teamLine.textContent = `${teamPrefix} 进${day.team.newContacts} · 有效${day.team.effectiveContacts} · 重复${day.team.duplicateContacts}`;
         dateCell.appendChild(teamLine);
       }
       row.appendChild(dateCell);

@@ -393,7 +393,7 @@
       <header class="modal-head">
         <div>
           <h3 id="statsTitle">统计看板</h3>
-          <p>会话、消息和客服工作量概览。</p>
+          <p id="statsSubtitle">会话、消息和客服工作量概览。</p>
         </div>
         <div class="stats-head-actions">
           <button id="statsExport" class="ghost export-btn" type="button">导出 CSV</button>
@@ -421,7 +421,7 @@
       </div>
 
       <div class="stats-section">
-        <div class="section-label">客服工作量</div>
+        <div id="statsWorkloadLabel" class="section-label">客服工作量</div>
         <div class="stats-table-wrap">
           <table class="stats-table">
             <thead>
@@ -444,9 +444,9 @@
           </table>
         </div>
       </div>
-      <div class="stats-section">
+      <div id="statsTeamSection" class="stats-section">
         <div class="stats-section-head">
-          <div class="section-label">每日进人 / 有效聊天</div>
+          <div id="statsDailyLabel" class="section-label">每日进人 / 有效聊天</div>
           <span id="teamDailyHint" class="viewer-table-hint"></span>
         </div>
         <div id="statsTeamSummary" class="stats-cards team-summary"></div>

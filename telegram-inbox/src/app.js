@@ -298,7 +298,7 @@ function createApp({ db, config, telegram, whatsapp, whatsappWeb, accounts, broa
     res.json({ ok: true });
   });
 
-  app.get("/api/users", requireAuth, (req, res) => {
+  app.get("/api/users", requireAdmin, (req, res) => {
     const includeInactive = req.user.role === "admin" && req.query.includeInactive === "1";
     const rows = db.prepare(
       `SELECT u.id, u.username, u.display_name, u.role, u.active,
@@ -1389,16 +1389,26 @@ function createApp({ db, config, telegram, whatsapp, whatsappWeb, accounts, broa
     res.json({ conversation: summary });
   });
 
+  const statsScope = req => req.user.role === "agent" ? { userId: req.user.id } : {};
+
   app.get("/api/stats", requireAuth, (req, res) => {
-    res.json({ stats: getStats(db, req.query.days, { slaFirstResponseMinutes: config.slaFirstResponseMinutes }) });
+    res.json({
+      stats: getStats(db, req.query.days, {
+        ...statsScope(req),
+        slaFirstResponseMinutes: config.slaFirstResponseMinutes
+      })
+    });
   });
 
   app.get("/api/stats/team-daily", requireAuth, (req, res) => {
-    res.json({ stats: getTeamDailyStats(db, req.query.days) });
+    res.json({ stats: getTeamDailyStats(db, req.query.days, statsScope(req)) });
   });
 
   app.get("/api/stats/export.csv", requireAuth, (req, res) => {
-    const stats = getStats(db, req.query.days, { slaFirstResponseMinutes: config.slaFirstResponseMinutes });
+    const stats = getStats(db, req.query.days, {
+      ...statsScope(req),
+      slaFirstResponseMinutes: config.slaFirstResponseMinutes
+    });
     const quote = value => `"${String(value ?? "").replace(/"/g, '""')}"`;
     const lines = [[
       "客服", "用户名", "角色", "进人", "新分配", "当前接待", "待处理",

@@ -164,6 +164,31 @@ test("admin console, audit, backup and security APIs", async t => {
     ));
   });
 
+  await t.test("agent stats are scoped to their own conversations", async () => {
+    const stats = await apiRequest(base, "/api/stats?days=1", { cookie: agentCookie });
+    assert.equal(stats.response.status, 200, JSON.stringify(stats.data));
+    assert.equal(stats.data.stats.agents.length, 1);
+    assert.equal(stats.data.stats.agents[0].id, agentId);
+    assert.equal(stats.data.stats.totals.conversations, 3);
+    assert.equal(stats.data.stats.totals.unassigned, 0);
+
+    const team = await apiRequest(base, "/api/stats/team-daily?days=1", { cookie: agentCookie });
+    assert.equal(team.response.status, 200, JSON.stringify(team.data));
+    assert.equal(team.data.stats.users.length, 1);
+    assert.equal(team.data.stats.users[0].id, agentId);
+    assert.equal(team.data.stats.team.totalEmployees, 1);
+    assert.equal(team.data.stats.team.totalNewContacts, 3);
+    assert.equal(team.data.stats.duplicates.length, 0);
+
+    const users = await apiRequest(base, "/api/users", { cookie: agentCookie });
+    assert.equal(users.response.status, 403);
+
+    const adminStats = await apiRequest(base, "/api/stats?days=1", { cookie: adminCookie });
+    assert.equal(adminStats.data.stats.agents.length, 2);
+    const adminTeam = await apiRequest(base, "/api/stats/team-daily?days=1", { cookie: adminCookie });
+    assert.equal(adminTeam.data.stats.users.length, 2);
+  });
+
   await t.test("messages can be recalled or deleted and are hidden from the inbox", async () => {
     const outbound = Number(db.prepare(
       `INSERT INTO messages
