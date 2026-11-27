@@ -443,9 +443,7 @@ function getTeamDailyStats(db, days = 7) {
      JOIN conversations c ON c.id = m.conversation_id
      WHERE m.created_at >= ? AND c.assignee_id IS NOT NULL AND m.deleted_at IS NULL
      GROUP BY c.id, substr(m.created_at, 1, 10)
-     HAVING COUNT(*) >= 4
-        AND SUM(CASE WHEN m.direction = 'in' THEN 1 ELSE 0 END) >= 1
-        AND SUM(CASE WHEN m.direction = 'out' THEN 1 ELSE 0 END) >= 1`
+     HAVING SUM(CASE WHEN m.direction = 'in' THEN 1 ELSE 0 END) >= 1`
   ).all(startIso);
 
   const messageRows = db.prepare(
@@ -684,7 +682,7 @@ function getTeamDailyStats(db, days = 7) {
     totals,
     duplicates,
     team,
-    definition: "进人=当天新建会话的不同联系人；有效聊天=当天双方都发过消息且总消息不少于 4 条的不同联系人；重复=同一联系人出现在多个员工名下，同日重复会额外标注。"
+    definition: "进人=当天新建会话的不同联系人；有效聊天=当天客户主动发过至少 1 条消息的不同联系人；重复=同一联系人出现在多个员工名下，同日重复会额外标注。"
   };
 }
 

@@ -157,8 +157,8 @@ test("admin console, audit, backup and security APIs", async t => {
     assert.equal(result.data.stats.rangeDays, 1);
     const agent = result.data.stats.totals.find(item => item.id === agentId);
     assert.equal(agent.newContacts, 3);
-    assert.equal(agent.effectiveContacts, 1);
-    assert.equal(result.data.stats.team.totalEffectiveContacts, 1);
+    assert.equal(agent.effectiveContacts, 3);
+    assert.equal(result.data.stats.team.totalEffectiveContacts, 3);
     assert.ok(result.data.stats.duplicates.some(item =>
       item.contact === "@customer_shared" && item.employeeIds.includes(agentId)
     ));

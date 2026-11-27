@@ -1996,7 +1996,7 @@ function renderTeamSummary(data) {
     const cards = [
       ["团队进人", team.totalNewContacts, "区间内去重联系人"],
       ["活跃联系人", team.totalContacts, "进人 + 有效去重"],
-      ["有效聊天", team.totalEffectiveContacts, "双方有来有回"],
+      ["有效聊天", team.totalEffectiveContacts, "客户主动发过消息"],
       ["重复联系人", team.duplicateContacts, `重复率 ${team.duplicateRate}%`],
       ["有效聊天占比", `${team.effectiveRate}%`, "有效 / 活跃联系人"],
       ["活跃员工", `${team.activeEmployees}/${team.totalEmployees}`, `零接待 ${team.zeroContactEmployees}`],
