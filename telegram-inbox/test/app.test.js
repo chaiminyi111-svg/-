@@ -420,6 +420,20 @@ test("Telegram support inbox end-to-end API", async t => {
     assert.equal(data.telegramConfigured, true);
   });
 
+  await t.test("root serves the customer page and /app serves the workbench", async () => {
+    const root = await fetch(base + "/", { redirect: "manual" });
+    assert.equal(root.status, 302);
+    assert.equal(root.headers.get("location"), "/go");
+
+    const appPage = await fetch(base + "/app");
+    assert.equal(appPage.status, 200);
+    assert.match(await appPage.text(), /<div id="app"|<title>/);
+
+    const index = await fetch(base + "/index.html", { redirect: "manual" });
+    assert.equal(index.status, 302);
+    assert.equal(index.headers.get("location"), "/app");
+  });
+
   await t.test("support redirect page exposes WhatsApp and Telegram links", async () => {
     const { response, data } = await apiRequest(base, "/go");
     assert.equal(response.status, 200);

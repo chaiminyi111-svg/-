@@ -1656,6 +1656,21 @@ function createApp({ db, config, telegram, whatsapp, whatsappWeb, accounts, broa
     });
   });
 
+  app.get("/", (req, res) => {
+    const queryIndex = req.originalUrl.indexOf("?");
+    const suffix = queryIndex >= 0 ? req.originalUrl.slice(queryIndex) : "";
+    res.redirect(302, `/go${suffix}`);
+  });
+
+  app.get(["/app", "/app/"], (req, res) => {
+    res.setHeader("Cache-Control", "no-cache");
+    res.sendFile(path.join(config.root, "public", "index.html"));
+  });
+
+  app.get("/index.html", (req, res) => {
+    res.redirect(302, "/app");
+  });
+
   app.get("/go", (req, res) => {
     const whatsappNumber = String(config.supportWhatsAppNumber || "").replace(/\D/g, "");
     const telegramBot = String(config.supportTelegramBot || "").replace(/^@/, "").replace(/[^A-Za-z0-9_]/g, "");

@@ -103,7 +103,7 @@ WHATSAPP_APP_SECRET=...
 npm start
 ```
 
-打开 `http://localhost:3000`，用 `ADMIN_USERNAME` 和 `ADMIN_PASSWORD` 登录。
+打开 `http://localhost:3000/app`，用 `ADMIN_USERNAME` 和 `ADMIN_PASSWORD` 登录。根路径 `http://localhost:3000/` 是给客户的 Snapchat 引流页。
 
 如果首次启动没有设置 `ADMIN_PASSWORD`，服务会生成一个随机密码并打印在启动日志里。登录后请立即在「修改密码」里改掉。
 
