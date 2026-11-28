@@ -336,14 +336,13 @@ TRUST_PROXY=true
    ```bash
    SUPPORT_WHATSAPP_NUMBER=8613800138000
    SUPPORT_TELEGRAM_BOT=your_support_bot
-   SUPPORT_GO_MESSAGE=Hi! Is it you who I am waiting for? Let's add each other as friends and have a chat!
    ```
 2. 重启服务后，把下面的链接放到 Snapchat 主页、Story 链接或广告落地页：
    - 让客户选择渠道：`https://你的域名/go`
    - 直接跳 WhatsApp：`https://你的域名/go?to=whatsapp`
    - 直接跳 Telegram：`https://你的域名/go?to=telegram`
 
-客户点击后只会打开对应 App 并预填第一句话，仍需要自己点「发送」或「开始」。WhatsApp / Telegram 不允许第三方自动加好友或自动发送第一条消息。
+客户点击后只会打开对应 App，不会自动填入或发送消息，仍需要自己点「发送」或「开始」。WhatsApp / Telegram 不允许第三方自动加好友或自动发送第一条消息。
 
 ## 环境变量
 
@@ -407,9 +406,8 @@ TRUST_PROXY=true
 | `PUBLIC_ORIGIN` | 空 | 固定前端访问地址，用于 CSRF 同源校验 |
 | `MAX_MESSAGE_LENGTH` | `4096` | 单条回复最大字符数 |
 | `SUPPORT_WHATSAPP_NUMBER` | 空 | `/go` 落地页的 WhatsApp 号码，国际格式、只填数字 |
-| `SUPPORT_TELEGRAM_BOT` | 空 | `/go` 落地页的 Telegram 机器人用户名，配置后带 `?start=snapchat` |
+| `SUPPORT_TELEGRAM_BOT` | 空 | `/go` 落地页的 Telegram 机器人用户名 |
 | `SUPPORT_TELEGRAM_USERNAME` | 空 | 没有机器人时可填普通 Telegram 用户名 |
-| `SUPPORT_GO_MESSAGE` | Hi! Is it you who I am waiting for? Let's add each other as friends and have a chat! | 打开聊天后预填的第一句话 |
 | `LOG_LEVEL` | `info` | `debug` / `info` / `warn` / `error` |
 
 ## 数据与备份

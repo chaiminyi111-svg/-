@@ -379,7 +379,6 @@ test("Telegram support inbox end-to-end API", async t => {
     maxMessageLength: 4096,
     supportWhatsAppNumber: "+86 138-0013-8000",
     supportTelegramBot: "@demo_support_bot",
-    supportGoMessage: "Is it you who I am waiting for? Let's chat!",
     logLevel: "error"
   };
 
@@ -427,16 +426,17 @@ test("Telegram support inbox end-to-end API", async t => {
     assert.match(data.raw, /Please contact me/);
     assert.match(data.raw, /WhatsApp/);
     assert.match(data.raw, /Telegram/);
-    assert.match(data.raw, /https:\/\/wa\.me\/8613800138000\?text=/);
-    assert.match(data.raw, /https:\/\/t\.me\/demo_support_bot\?start=snapchat/);
+    assert.match(data.raw, /https:\/\/wa\.me\/8613800138000/);
+    assert.doesNotMatch(data.raw, /\?text=/);
+    assert.match(data.raw, /https:\/\/t\.me\/demo_support_bot/);
 
     const whatsapp = await fetch(base + "/go?to=whatsapp", { redirect: "manual" });
     assert.equal(whatsapp.status, 302);
-    assert.match(whatsapp.headers.get("location"), /^https:\/\/wa\.me\/8613800138000\?text=/);
+    assert.match(whatsapp.headers.get("location"), /^https:\/\/wa\.me\/8613800138000$/);
 
     const telegram = await fetch(base + "/go?to=telegram", { redirect: "manual" });
     assert.equal(telegram.status, 302);
-    assert.match(telegram.headers.get("location"), /^https:\/\/t\.me\/demo_support_bot\?start=snapchat$/);
+    assert.match(telegram.headers.get("location"), /^https:\/\/t\.me\/demo_support_bot$/);
   });
 
   await t.test("ingest inbound text creates conversation and unread", async () => {

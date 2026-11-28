@@ -71,7 +71,7 @@ function escapeHtml(value) {
   })[char]);
 }
 
-function renderSupportGoPage({ whatsappUrl, telegramUrl, prefill, configured }) {
+function renderSupportGoPage({ whatsappUrl, telegramUrl }) {
   const buttons = [
     whatsappUrl
       ? `<a class="channel whatsapp" href="${escapeHtml(whatsappUrl)}">
@@ -105,7 +105,6 @@ function renderSupportGoPage({ whatsappUrl, telegramUrl, prefill, configured }) 
   .dot { width:8px; height:8px; border-radius:50%; background:var(--yellow); box-shadow:0 0 14px var(--yellow); }
   h1 { margin:18px 0 8px; font-size:28px; line-height:1.2; }
   p { margin:0; color:var(--muted); line-height:1.7; font-size:14px; }
-  .prefill { margin-top:16px; padding:12px 14px; border-radius:14px; background:rgba(255,255,255,.05); border:1px solid var(--line); color:#d7cedd; font-size:13px; line-height:1.6; }
   .channels { display:grid; gap:12px; margin-top:22px; }
   .channel { display:flex; align-items:center; gap:14px; padding:15px; border-radius:18px; text-decoration:none; color:var(--text); background:#120f16; border:1px solid var(--line); transition:transform .15s ease,border-color .15s ease; }
   .channel:hover { transform:translateY(-1px); border-color:#4a3e55; }
@@ -125,7 +124,6 @@ function renderSupportGoPage({ whatsappUrl, telegramUrl, prefill, configured }) 
   <div class="badge"><span class="dot"></span>LET'S CHAT</div>
   <h1>Please contact me</h1>
   <p>Choose how you would like to chat, and I will get back to you as soon as I can.</p>
-  ${configured ? `<div class="prefill">Your first message is ready: ${escapeHtml(prefill)}</div>` : ""}
   ${buttons ? `<div class="channels">${buttons}</div>` : `<div class="empty">Channels are being set up. Please try again later, or reply to me on Snapchat.</div>`}
   <div class="note">If the button does not work, make sure the app is installed on your phone.</div>
 </main>
@@ -1662,15 +1660,10 @@ function createApp({ db, config, telegram, whatsapp, whatsappWeb, accounts, broa
     const whatsappNumber = String(config.supportWhatsAppNumber || "").replace(/\D/g, "");
     const telegramBot = String(config.supportTelegramBot || "").replace(/^@/, "").replace(/[^A-Za-z0-9_]/g, "");
     const telegramUsername = String(config.supportTelegramUsername || "").replace(/^@/, "").replace(/[^A-Za-z0-9_]/g, "");
-    const prefill = String(config.supportGoMessage || "Is it you who I'm waiting for? Let's add each other as friends and have a chat!");
-    const whatsappUrl = whatsappNumber
-      ? `https://wa.me/${whatsappNumber}?text=${encodeURIComponent(prefill)}`
+    const whatsappUrl = whatsappNumber ? `https://wa.me/${whatsappNumber}` : "";
+    const telegramUrl = telegramBot || telegramUsername
+      ? `https://t.me/${telegramBot || telegramUsername}`
       : "";
-    const telegramUrl = telegramBot
-      ? `https://t.me/${telegramBot}?start=snapchat`
-      : telegramUsername
-        ? `https://t.me/${telegramUsername}`
-        : "";
 
     res.setHeader("Cache-Control", "no-store");
     res.setHeader("X-Robots-Tag", "noindex");
@@ -1678,22 +1671,20 @@ function createApp({ db, config, telegram, whatsapp, whatsappWeb, accounts, broa
     const to = String(req.query.to || "").toLowerCase();
     if (to === "whatsapp" || to === "wa") {
       if (!whatsappUrl) return res.status(503).type("html").send(renderSupportGoPage({
-        whatsappUrl, telegramUrl, prefill, configured: false
+        whatsappUrl, telegramUrl
       }));
       return res.redirect(302, whatsappUrl);
     }
     if (to === "telegram" || to === "tg") {
       if (!telegramUrl) return res.status(503).type("html").send(renderSupportGoPage({
-        whatsappUrl, telegramUrl, prefill, configured: false
+        whatsappUrl, telegramUrl
       }));
       return res.redirect(302, telegramUrl);
     }
 
     res.type("html").send(renderSupportGoPage({
       whatsappUrl,
-      telegramUrl,
-      prefill,
-      configured: Boolean(whatsappUrl || telegramUrl)
+      telegramUrl
     }));
   });
 

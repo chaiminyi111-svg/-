@@ -89,7 +89,6 @@ const config = {
   supportWhatsAppNumber: (process.env.SUPPORT_WHATSAPP_NUMBER || "").trim(),
   supportTelegramBot: (process.env.SUPPORT_TELEGRAM_BOT || "").trim(),
   supportTelegramUsername: (process.env.SUPPORT_TELEGRAM_USERNAME || "").trim(),
-  supportGoMessage: (process.env.SUPPORT_GO_MESSAGE || "Is it you who I'm waiting for? Let's add each other as friends and have a chat!").trim(),
   logLevel: process.env.LOG_LEVEL || "info"
 };
 
