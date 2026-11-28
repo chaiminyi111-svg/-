@@ -61,6 +61,78 @@ function parseId(value) {
   return Number.isFinite(id) && id > 0 ? id : null;
 }
 
+function escapeHtml(value) {
+  return String(value).replace(/[&<>"']/g, char => ({
+    "&": "&amp;",
+    "<": "&lt;",
+    ">": "&gt;",
+    '"': "&quot;",
+    "'": "&#39;"
+  })[char]);
+}
+
+function renderSupportGoPage({ whatsappUrl, telegramUrl, prefill, configured }) {
+  const buttons = [
+    whatsappUrl
+      ? `<a class="channel whatsapp" href="${escapeHtml(whatsappUrl)}">
+          <span class="icon">WA</span>
+          <span class="copy"><strong>WhatsApp 客服</strong><small>打开 WhatsApp 后点发送</small></span>
+          <span class="arrow">→</span>
+        </a>`
+      : "",
+    telegramUrl
+      ? `<a class="channel telegram" href="${escapeHtml(telegramUrl)}">
+          <span class="icon">TG</span>
+          <span class="copy"><strong>Telegram 客服</strong><small>打开 Telegram 后点开始</small></span>
+          <span class="arrow">→</span>
+        </a>`
+      : ""
+  ].join("");
+
+  return `<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>联系客服</title>
+<style>
+  :root { color-scheme: dark; --bg:#0d0b10; --card:#18131e; --line:#2c2533; --text:#f7f2ea; --muted:#a79eaa; --yellow:#fffc00; }
+  * { box-sizing: border-box; }
+  body { margin:0; min-height:100vh; display:grid; place-items:center; padding:24px; background:radial-gradient(circle at 50% 0%, #2a1f0b 0, var(--bg) 55%); color:var(--text); font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif; }
+  main { width:min(460px,100%); background:linear-gradient(180deg,#211a29,var(--card)); border:1px solid var(--line); border-radius:26px; padding:28px; box-shadow:0 24px 80px rgba(0,0,0,.45); }
+  .badge { display:inline-flex; align-items:center; gap:8px; padding:7px 12px; border-radius:999px; background:rgba(255,252,0,.12); color:var(--yellow); font-size:12px; font-weight:700; letter-spacing:.08em; }
+  .dot { width:8px; height:8px; border-radius:50%; background:var(--yellow); box-shadow:0 0 14px var(--yellow); }
+  h1 { margin:18px 0 8px; font-size:28px; line-height:1.2; }
+  p { margin:0; color:var(--muted); line-height:1.7; font-size:14px; }
+  .prefill { margin-top:16px; padding:12px 14px; border-radius:14px; background:rgba(255,255,255,.05); border:1px solid var(--line); color:#d7cedd; font-size:13px; line-height:1.6; }
+  .channels { display:grid; gap:12px; margin-top:22px; }
+  .channel { display:flex; align-items:center; gap:14px; padding:15px; border-radius:18px; text-decoration:none; color:var(--text); background:#120f16; border:1px solid var(--line); transition:transform .15s ease,border-color .15s ease; }
+  .channel:hover { transform:translateY(-1px); border-color:#4a3e55; }
+  .icon { width:46px; height:46px; flex:0 0 46px; display:grid; place-items:center; border-radius:14px; font-weight:800; font-size:13px; letter-spacing:.04em; }
+  .whatsapp .icon { background:rgba(37,211,102,.14); color:#25d366; }
+  .telegram .icon { background:rgba(42,171,238,.14); color:#2aabee; }
+  .copy { display:grid; gap:3px; flex:1; }
+  .copy strong { font-size:15px; }
+  .copy small { color:var(--muted); font-size:12px; }
+  .arrow { color:var(--muted); font-size:20px; }
+  .empty { margin-top:22px; padding:18px; border-radius:16px; background:rgba(255,255,255,.04); border:1px dashed var(--line); color:var(--muted); font-size:14px; line-height:1.7; }
+  .note { margin-top:18px; text-align:center; font-size:12px; color:#7f7585; }
+</style>
+</head>
+<body>
+<main>
+  <div class="badge"><span class="dot"></span>ONLINE SUPPORT</div>
+  <h1>联系客服</h1>
+  <p>选择你常用的聊天方式，我们会尽快回复。</p>
+  ${configured ? `<div class="prefill">打开后已帮你填好：${escapeHtml(prefill)}</div>` : ""}
+  ${buttons ? `<div class="channels">${buttons}</div>` : `<div class="empty">客服通道正在配置中，请稍后再试，或直接回复 Snapchat 消息。</div>`}
+  <div class="note">如果按钮没有反应，请确认手机已安装对应 App。</div>
+</main>
+</body>
+</html>`;
+}
+
 function createApp({ db, config, telegram, whatsapp, whatsappWeb, accounts, broadcaster, logger, translate, ai }) {
   const app = express();
   app.disable("x-powered-by");
@@ -1584,6 +1656,45 @@ function createApp({ db, config, telegram, whatsapp, whatsappWeb, accounts, broa
     req.on("close", () => {
       broadcaster.remove(res);
     });
+  });
+
+  app.get("/go", (req, res) => {
+    const whatsappNumber = String(config.supportWhatsAppNumber || "").replace(/\D/g, "");
+    const telegramBot = String(config.supportTelegramBot || "").replace(/^@/, "").replace(/[^A-Za-z0-9_]/g, "");
+    const telegramUsername = String(config.supportTelegramUsername || "").replace(/^@/, "").replace(/[^A-Za-z0-9_]/g, "");
+    const prefill = String(config.supportGoMessage || "你好，我在 Snapchat 看到你们，想咨询一下。");
+    const whatsappUrl = whatsappNumber
+      ? `https://wa.me/${whatsappNumber}?text=${encodeURIComponent(prefill)}`
+      : "";
+    const telegramUrl = telegramBot
+      ? `https://t.me/${telegramBot}?start=snapchat`
+      : telegramUsername
+        ? `https://t.me/${telegramUsername}`
+        : "";
+
+    res.setHeader("Cache-Control", "no-store");
+    res.setHeader("X-Robots-Tag", "noindex");
+
+    const to = String(req.query.to || "").toLowerCase();
+    if (to === "whatsapp" || to === "wa") {
+      if (!whatsappUrl) return res.status(503).type("html").send(renderSupportGoPage({
+        whatsappUrl, telegramUrl, prefill, configured: false
+      }));
+      return res.redirect(302, whatsappUrl);
+    }
+    if (to === "telegram" || to === "tg") {
+      if (!telegramUrl) return res.status(503).type("html").send(renderSupportGoPage({
+        whatsappUrl, telegramUrl, prefill, configured: false
+      }));
+      return res.redirect(302, telegramUrl);
+    }
+
+    res.type("html").send(renderSupportGoPage({
+      whatsappUrl,
+      telegramUrl,
+      prefill,
+      configured: Boolean(whatsappUrl || telegramUrl)
+    }));
   });
 
   const publicDir = path.join(config.root, "public");

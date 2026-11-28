@@ -86,6 +86,10 @@ const config = {
         : "auto",
   publicOrigin: (process.env.PUBLIC_ORIGIN || "").replace(/\/+$/, ""),
   maxMessageLength: Math.min(Math.max(readInt("MAX_MESSAGE_LENGTH", 4096), 1), 4096),
+  supportWhatsAppNumber: (process.env.SUPPORT_WHATSAPP_NUMBER || "").trim(),
+  supportTelegramBot: (process.env.SUPPORT_TELEGRAM_BOT || "").trim(),
+  supportTelegramUsername: (process.env.SUPPORT_TELEGRAM_USERNAME || "").trim(),
+  supportGoMessage: (process.env.SUPPORT_GO_MESSAGE || "你好，我在 Snapchat 看到你们，想咨询一下。").trim(),
   logLevel: process.env.LOG_LEVEL || "info"
 };
 

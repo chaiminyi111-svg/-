@@ -377,6 +377,9 @@ test("Telegram support inbox end-to-end API", async t => {
     cookieSecure: false,
     publicOrigin: "",
     maxMessageLength: 4096,
+    supportWhatsAppNumber: "+86 138-0013-8000",
+    supportTelegramBot: "@demo_support_bot",
+    supportGoMessage: "你好，我在 Snapchat 看到你们",
     logLevel: "error"
   };
 
@@ -416,6 +419,23 @@ test("Telegram support inbox end-to-end API", async t => {
     assert.equal(response.status, 200);
     assert.equal(data.ok, true);
     assert.equal(data.telegramConfigured, true);
+  });
+
+  await t.test("support redirect page exposes WhatsApp and Telegram links", async () => {
+    const { response, data } = await apiRequest(base, "/go");
+    assert.equal(response.status, 200);
+    assert.match(data.raw, /WhatsApp 客服/);
+    assert.match(data.raw, /Telegram 客服/);
+    assert.match(data.raw, /https:\/\/wa\.me\/8613800138000\?text=/);
+    assert.match(data.raw, /https:\/\/t\.me\/demo_support_bot\?start=snapchat/);
+
+    const whatsapp = await fetch(base + "/go?to=whatsapp", { redirect: "manual" });
+    assert.equal(whatsapp.status, 302);
+    assert.match(whatsapp.headers.get("location"), /^https:\/\/wa\.me\/8613800138000\?text=/);
+
+    const telegram = await fetch(base + "/go?to=telegram", { redirect: "manual" });
+    assert.equal(telegram.status, 302);
+    assert.match(telegram.headers.get("location"), /^https:\/\/t\.me\/demo_support_bot\?start=snapchat$/);
   });
 
   await t.test("ingest inbound text creates conversation and unread", async () => {
