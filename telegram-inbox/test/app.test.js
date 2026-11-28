@@ -1140,6 +1140,43 @@ test("Telegram support inbox end-to-end API", async t => {
     assert.equal(restored.data.telegram.configured, true);
     assert.equal(telegram.configured, true);
   });
+
+  await t.test("only admins can delete a conversation and its messages", async () => {
+    const forbidden = await apiRequest(base, `/api/conversations/${conversationId}`, {
+      method: "DELETE",
+      cookie: agent1Cookie
+    });
+    assert.equal(forbidden.response.status, 403);
+    assert.ok(db.prepare("SELECT id FROM conversations WHERE id = ?").get(conversationId));
+
+    const deleted = await apiRequest(base, `/api/conversations/${conversationId}`, {
+      method: "DELETE",
+      cookie: adminCookie
+    });
+    assert.equal(deleted.response.status, 200, JSON.stringify(deleted.data));
+    assert.equal(deleted.data.ok, true);
+    assert.equal(deleted.data.conversation.id, conversationId);
+    assert.equal(
+      db.prepare("SELECT COUNT(*) AS c FROM conversations WHERE id = ?").get(conversationId).c,
+      0
+    );
+    assert.equal(
+      db.prepare("SELECT COUNT(*) AS c FROM messages WHERE conversation_id = ?").get(conversationId).c,
+      0
+    );
+    assert.ok(db.prepare(
+      "SELECT id FROM audit_logs WHERE action = 'conversation.deleted' AND target_id = ?"
+    ).get(String(conversationId)));
+    assert.ok(broadcastEvents.some(event =>
+      event.type === "conversation.removed" && event.conversationId === conversationId
+    ));
+
+    const missing = await apiRequest(base, `/api/conversations/${conversationId}`, {
+      method: "DELETE",
+      cookie: adminCookie
+    });
+    assert.equal(missing.response.status, 404);
+  });
 });
 
 test("broadcaster filters events by conversation assignee", () => {

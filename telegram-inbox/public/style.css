@@ -3117,3 +3117,13 @@ input:focus, select:focus, textarea:focus {
   .admin-toolbar-actions { width: 100%; }
   .admin-toolbar-actions input { min-width: 0; flex: 1 1 120px; }
 }
+
+.chat-actions .danger {
+  color: #d93025;
+  border-color: #f0c4c0;
+}
+.chat-actions .danger:hover {
+  color: #fff;
+  background: #d93025;
+  border-color: #d93025;
+}

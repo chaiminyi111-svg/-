@@ -1167,6 +1167,26 @@ function createApp({ db, config, telegram, whatsapp, whatsappWeb, accounts, broa
     res.json({ conversation: toConversationSummary(conversation) });
   });
 
+  app.delete("/api/conversations/:id", requireAdmin, (req, res) => {
+    const id = parseId(req.params.id);
+    const conversation = id ? getConversationById(db, id) : null;
+    if (!conversation) return jsonError(res, 404, "会话不存在");
+
+    const summary = toConversationSummary(conversation);
+    db.prepare("DELETE FROM conversations WHERE id = ?").run(id);
+    audit(db, req.user.id, "conversation.deleted", "conversation", id, JSON.stringify({
+      title: conversation.title,
+      channel: conversation.channel,
+      chatId: conversation.telegram_chat_id
+    }));
+    broadcaster?.broadcast({
+      type: "conversation.removed",
+      conversationId: id,
+      conversation: summary
+    });
+    res.json({ ok: true, conversation: summary });
+  });
+
   app.get("/api/conversations/:id/ai-suggestion", requireAuth, (req, res) => {
     const id = parseId(req.params.id);
     const conversation = accessibleConversation(req, id);

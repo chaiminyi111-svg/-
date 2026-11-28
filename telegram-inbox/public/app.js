@@ -1209,6 +1209,7 @@ function renderChatHeader() {
   const markUnreadBtn = $("#markUnreadBtn");
   markUnreadBtn.disabled = unread > 0;
   markUnreadBtn.title = unread > 0 ? "当前会话已有未读消息" : "把当前会话标记为未读";
+  $("#deleteConversationBtn").hidden = state.me?.role !== "admin";
 
   $("#statusSelect").value = conversation.status;
   renderAssigneeOptions(conversation);
@@ -1380,6 +1381,37 @@ async function markConversationUnread() {
     showToast(error.message, "error");
   } finally {
     button.disabled = Number(conversation.unreadCount || 0) > 0;
+  }
+}
+
+async function deleteActiveConversation() {
+  const conversation = state.active;
+  if (!conversation || state.me?.role !== "admin") return;
+  const title = conversation.title || "未命名会话";
+  const confirmed = window.confirm(
+    `确定删除「${title}」吗？\n\n` +
+    "只会删除工作台里的会话和消息，不会删除客户手机上的聊天记录。\n" +
+    "删除后无法恢复；客户之后发新消息会创建新会话。"
+  );
+  if (!confirmed) return;
+
+  const button = $("#deleteConversationBtn");
+  button.disabled = true;
+  try {
+    await api(`/api/conversations/${conversation.id}`, { method: "DELETE" });
+    state.threadToken += 1;
+    state.activeId = null;
+    state.active = null;
+    state.messages = [];
+    document.body.classList.remove("mobile-chat-open");
+    await loadConversations({ silent: true });
+    renderChatHeader();
+    renderMessages();
+    showToast("会话已删除", "success");
+  } catch (error) {
+    showToast(error.message, "error");
+  } finally {
+    button.disabled = false;
   }
 }
 
@@ -3433,6 +3465,7 @@ const AUDIT_LABELS = {
   "account.reconnected": "重连个人号",
   "message.recalled": "撤回消息",
   "message.deleted": "删除消息",
+  "conversation.deleted": "删除会话",
   "support.links_updated": "修改客户页跳转账号",
   "telegram.token_updated": "修改 Telegram 渠道",
   "telegram.token_cleared": "清除 Telegram 渠道",
@@ -4329,6 +4362,7 @@ function bindEvents() {
   });
 
   $("#markUnreadBtn").addEventListener("click", markConversationUnread);
+  $("#deleteConversationBtn").addEventListener("click", deleteActiveConversation);
   $("#customerBtn").addEventListener("click", () => {
     const panel = $("#customerPanel");
     panel.hidden = !panel.hidden;
