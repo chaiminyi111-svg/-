@@ -1,3 +1,4 @@
+const crypto = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
 const QRCode = require("qrcode");
@@ -86,6 +87,30 @@ function isPrivateJid(jid) {
 
 function jidNumber(jid) {
   return String(jid || "").split("@")[0].split(":")[0];
+}
+
+function mediaKind(mimeType) {
+  const type = String(mimeType || "").toLowerCase();
+  if (type.startsWith("image/")) return "image";
+  if (type.startsWith("video/")) return "video";
+  if (type.startsWith("audio/")) return "audio";
+  return "document";
+}
+
+function mediaExtension(fileName, mimeType) {
+  const fromName = path.extname(String(fileName || "")).toLowerCase();
+  if (/^\.[a-z0-9]{1,8}$/.test(fromName)) return fromName;
+  const type = String(mimeType || "").split(";")[0].trim().toLowerCase();
+  return {
+    "image/jpeg": ".jpg",
+    "image/png": ".png",
+    "image/webp": ".webp",
+    "image/gif": ".gif",
+    "video/mp4": ".mp4",
+    "audio/mpeg": ".mp3",
+    "audio/ogg": ".ogg",
+    "application/pdf": ".pdf"
+  }[type] || ".bin";
 }
 
 function timestampOf(message) {
@@ -675,6 +700,115 @@ function createWhatsAppWebService({
     return { message, conversation: summary };
   }
 
+  function saveOutboundMedia(file) {
+    const dir = path.join(config.dataDir, "outbound-media");
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    try { fs.chmodSync(dir, 0o700); } catch {}
+    const localFile = `${Date.now()}-${crypto.randomUUID()}${mediaExtension(file.fileName, file.mimeType)}`;
+    const fullPath = path.join(dir, localFile);
+    fs.writeFileSync(fullPath, file.buffer, { mode: 0o600 });
+    return { localFile, fullPath };
+  }
+
+  async function sendMedia(conversation, file, user, options = {}) {
+    if (!running || !socket) {
+      throw new WhatsAppWebError(
+        "WhatsApp 个人号未连接，请管理员在「渠道」中扫码登录",
+        "NOT_CONFIGURED"
+      );
+    }
+
+    const rawChatId = String(conversation.telegram_chat_id || "");
+    const jid = (accountId ? rawChatId.replace(`waweb:${accountId}:`, "") : rawChatId.replace(/^waweb:/, ""));
+    if (!isPrivateJid(jid)) {
+      throw new WhatsAppWebError("暂不支持向该 WhatsApp 会话发送附件", "INVALID_INPUT");
+    }
+    if (!Buffer.isBuffer(file?.buffer) || !file.buffer.length) {
+      throw new WhatsAppWebError("附件内容为空", "INVALID_INPUT");
+    }
+
+    const mimeType = (String(file.mimeType || "application/octet-stream").replace(/[\r\n]/g, "").trim() ||
+      "application/octet-stream").slice(0, 120);
+    const fileName = (String(file.fileName || "file").replace(/[\r\n]/g, " ").trim() || "file").slice(0, 180);
+    const caption = String(file.caption || "").trim().slice(0, 1024);
+    const kind = mediaKind(mimeType);
+    const stored = saveOutboundMedia({ buffer: file.buffer, fileName, mimeType });
+
+    const content = kind === "image"
+      ? { image: file.buffer, mimetype: mimeType }
+      : kind === "video"
+        ? { video: file.buffer, mimetype: mimeType }
+        : kind === "audio"
+          ? { audio: file.buffer, mimetype: mimeType, ptt: false }
+          : { document: file.buffer, fileName, mimetype: mimeType };
+    if (caption) content.caption = caption;
+
+    let sent;
+    try {
+      sent = await socket.sendMessage(jid, content);
+    } catch (error) {
+      try { fs.rmSync(stored.fullPath, { force: true }); } catch {}
+      throw error;
+    }
+
+    const messageId = String(sent?.key?.id || `waweb-out-${Date.now()}`);
+    const createdAt = timestampOf(sent);
+    const now = nowIso();
+    const messageType = kind === "image" ? "photo"
+      : kind === "video" ? "video"
+        : kind === "audio" ? "audio" : "document";
+    const body = caption || (kind === "document" ? `[文件] ${fileName}` : `[${kind === "image" ? "图片" : kind === "video" ? "视频" : "音频"}]`);
+    const meta = {
+      via: "whatsapp_web",
+      jid,
+      media: kind,
+      fileName,
+      mimeType,
+      fileSize: file.buffer.length,
+      caption,
+      localFile: stored.localFile,
+      ...(options.meta || {})
+    };
+
+    const rowId = withTransaction(db, () => {
+      const insert = db.prepare(
+        `INSERT INTO messages
+           (conversation_id, telegram_message_id, direction, sender_id, sender_name,
+            body, message_type, meta_json, delivery_status, delivery_updated_at, created_at)
+         VALUES (?, ?, 'out', ?, ?, ?, ?, ?, 'sent', ?, ?)`
+      ).run(
+        conversation.id,
+        messageId,
+        user.id,
+        user.displayName || user.display_name || user.username || "客服",
+        body,
+        messageType,
+        JSON.stringify(meta),
+        now,
+        createdAt
+      );
+
+      db.prepare(
+        `UPDATE conversations
+         SET last_message_at = ?,
+             last_message_preview = ?,
+             last_message_direction = 'out',
+             first_response_at = COALESCE(first_response_at, ?),
+             updated_at = ?
+         WHERE id = ?`
+      ).run(createdAt, messagePreview(body), now, now, conversation.id);
+
+      return Number(insert.lastInsertRowid);
+    });
+
+    const conversationRow = getConversationById(db, conversation.id);
+    const messageRow = db.prepare("SELECT * FROM messages WHERE id = ?").get(rowId);
+    const message = toPublicMessage(messageRow);
+    const summary = toConversationSummary(conversationRow);
+    emit({ type: "message.created", conversation: summary, message });
+    return { message, conversation: summary };
+  }
+
   async function deleteMessage(conversation, message) {
     if (!running || !socket) {
       throw new WhatsAppWebError(
@@ -726,6 +860,7 @@ function createWhatsAppWebService({
     beginLogin,
     logout,
     sendReply,
+    sendMedia,
     deleteMessage,
     ingestMessage,
     status

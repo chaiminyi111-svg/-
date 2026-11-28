@@ -1,3 +1,4 @@
+const fs = require("node:fs");
 const path = require("node:path");
 const { Readable } = require("node:stream");
 const express = require("express");
@@ -45,6 +46,7 @@ const {
 } = require("./store");
 const {
   nowIso,
+  safeJsonParse,
   toPublicUser,
   toConversationSummary,
   toPublicMessage,
@@ -1356,7 +1358,8 @@ function createApp({ db, config, telegram, whatsapp, whatsappWeb, accounts, broa
     const conversation = accessibleConversation(req, id);
     if (!conversation) return jsonError(res, 404, "会话不存在");
 
-    if ((conversation.channel || "telegram") !== "telegram") {
+    const channel = conversation.channel || "telegram";
+    if (!["telegram", "whatsapp_web"].includes(channel)) {
       return jsonError(res, 400, "当前渠道暂不支持出站附件");
     }
     if (!Buffer.isBuffer(req.body) || !req.body.length) {
@@ -1365,7 +1368,7 @@ function createApp({ db, config, telegram, whatsapp, whatsappWeb, accounts, broa
     if (req.body.length > 20 * 1024 * 1024) {
       return jsonError(res, 413, "文件不能超过 20MB");
     }
-    if (!telegram?.configured) {
+    if (channel === "telegram" && !telegram?.configured) {
       return jsonError(res, 503, "未配置 TELEGRAM_BOT_TOKEN，暂时无法发送附件");
     }
 
@@ -1381,22 +1384,33 @@ function createApp({ db, config, telegram, whatsapp, whatsappWeb, accounts, broa
     const caption = decode(req.get("x-caption")).trim();
     if (caption.length > 1024) return jsonError(res, 400, "附件说明不能超过 1024 个字符");
 
+    const file = {
+      buffer: req.body,
+      fileName,
+      mimeType,
+      caption
+    };
+    const mediaService = channel === "telegram"
+      ? telegram
+      : (conversation.account_id ? accounts : whatsappWeb);
+    if (!mediaService || typeof mediaService.sendMedia !== "function") {
+      return jsonError(res, 503, `${channel === "whatsapp_web" ? "WhatsApp 个人号" : "当前渠道"}暂不支持发送附件`);
+    }
+
     try {
-      const result = await telegram.sendMedia(conversation, {
-        buffer: req.body,
-        fileName,
-        mimeType,
-        caption
-      }, req.user);
+      const result = await mediaService.sendMedia(conversation, file, req.user);
       audit(db, req.user.id, "message.media_sent", "conversation", id, JSON.stringify({
+        channel,
         fileName,
         mimeType,
         size: req.body.length
       }));
       res.status(201).json(result);
     } catch (error) {
-      logger?.warn("发送 Telegram 附件失败", error.message);
-      const status = error.code === "NOT_CONFIGURED" ? 503 : 502;
+      logger?.warn(`发送 ${channel} 附件失败`, error.message);
+      const status = error.code === "NOT_CONFIGURED" ? 503
+        : error.code === "NOT_SUPPORTED" ? 501
+          : error.code === "INVALID_INPUT" ? 400 : 502;
       return jsonError(res, status, error.message || "发送附件失败");
     }
   }));
@@ -1656,7 +1670,45 @@ function createApp({ db, config, telegram, whatsapp, whatsappWeb, accounts, broa
 
     const conversation = accessibleConversation(req, message.conversation_id);
     if (!conversation) return jsonError(res, 404, "会话不存在");
-    if ((conversation.channel || "telegram") !== "telegram") {
+    const channel = conversation.channel || "telegram";
+
+    if (channel === "whatsapp_web") {
+      const meta = safeJsonParse(message.meta_json, {});
+      const localFile = typeof meta.localFile === "string" ? path.basename(meta.localFile) : "";
+      if (!localFile) return jsonError(res, 501, "当前消息没有可用的本地媒体");
+      const filePath = path.join(config.dataDir, "outbound-media", localFile);
+      let stat;
+      try {
+        stat = fs.statSync(filePath);
+      } catch {
+        return jsonError(res, 404, "媒体文件不存在");
+      }
+      if (!stat.isFile()) return jsonError(res, 404, "媒体文件不存在");
+
+      const safeName = String(meta.fileName || "whatsapp-file").replace(/["\\\r\n]/g, "_");
+      const mimeType = String(meta.mimeType || "application/octet-stream").replace(/[\r\n]/g, "").slice(0, 120) ||
+        "application/octet-stream";
+      const safeInline = /^(image\/(jpeg|jpg|png|gif|webp|bmp|avif)|video\/(mp4|webm|ogg)|audio\/(mpeg|mp4|ogg|wav|webm))$/i
+        .test(mimeType);
+      const inline = safeInline && ["photo", "video", "audio", "voice"].includes(message.message_type);
+      res.setHeader("Content-Type", mimeType);
+      res.setHeader("Content-Length", String(stat.size));
+      res.setHeader("X-Content-Type-Options", "nosniff");
+      res.setHeader(
+        "Content-Disposition",
+        `${inline ? "inline" : "attachment"}; filename*=UTF-8''${encodeURIComponent(safeName)}`
+      );
+      res.setHeader("Cache-Control", "private, max-age=300");
+      fs.createReadStream(filePath)
+        .on("error", () => {
+          if (!res.headersSent) res.status(404).end();
+          else res.destroy();
+        })
+        .pipe(res);
+      return;
+    }
+
+    if (channel !== "telegram") {
       return jsonError(res, 501, "当前渠道暂不支持媒体下载");
     }
     if (!telegram?.configured) return jsonError(res, 503, "未配置 Telegram Bot Token");

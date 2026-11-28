@@ -282,6 +282,17 @@ function createAccountsService({ db, config, logger, broadcaster, translate, hoo
     return service.sendReply(conversation, text, user, options);
   }
 
+  async function sendMedia(conversation, file, user, options = {}) {
+    const row = conversation?.account_id ? rowById(conversation.account_id) : null;
+    if (!row) throw new AccountError("个人号账号不存在", "NOT_CONFIGURED");
+    const service = serviceFor(row);
+    if (!service.running) throw new AccountError(`${channelLabel(row.channel)} 个人号未登录`, "NOT_CONFIGURED");
+    if (typeof service.sendMedia !== "function") {
+      throw new AccountError("当前个人号渠道不支持发送附件", "NOT_SUPPORTED");
+    }
+    return service.sendMedia(conversation, file, user, options);
+  }
+
   async function deleteMessage(conversation, message) {
     const row = conversation?.account_id ? rowById(conversation.account_id) : null;
     if (!row) throw new AccountError("个人号账号不存在", "NOT_CONFIGURED");
@@ -324,6 +335,7 @@ function createAccountsService({ db, config, logger, broadcaster, translate, hoo
     remove,
     reconnect,
     sendReply,
+    sendMedia,
     deleteMessage,
     stopAll
   };

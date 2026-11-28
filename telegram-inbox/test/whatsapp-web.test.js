@@ -6,6 +6,7 @@ const path = require("node:path");
 
 const { openDatabase, bootstrapAdmin } = require("../src/db");
 const { getConversationById } = require("../src/store");
+const { createApp } = require("../src/app");
 const { createLogger } = require("../src/util");
 const {
   contentOf,
@@ -46,6 +47,7 @@ function createTestContext(options = {}) {
     adminDisplayName: "管理员",
     autoAssign: false,
     agentMaxActive: 0,
+    dataDir: dir,
     whatsappWebEnabled: options.enabled !== false,
     whatsappWebSessionPath: path.join(dir, "session")
   };
@@ -211,6 +213,33 @@ test("WhatsApp Web QR login, inbound text, outbound reply and logout", async () 
     );
     assert.ok(ctx.events.some(event => event.type === "message.status"));
 
+    const mediaReply = await ctx.service.sendMedia(
+      getConversationById(ctx.db, conversation.id),
+      {
+        buffer: Buffer.from("fake-image"),
+        fileName: "paste.png",
+        mimeType: "image/png",
+        caption: "看图"
+      },
+      ctx.admin
+    );
+    assert.equal(mediaReply.message.type, "photo");
+    assert.equal(mediaReply.message.body, "看图");
+    assert.equal(mediaReply.message.deliveryStatus, "sent");
+    assert.equal(mediaReply.message.meta.fileName, "paste.png");
+    assert.ok(mediaReply.message.meta.localFile);
+    assert.equal(ctx.fake.sent.at(-1).content.image.toString(), "fake-image");
+    assert.equal(ctx.fake.sent.at(-1).content.caption, "看图");
+    const storedMedia = ctx.db.prepare(
+      "SELECT * FROM messages WHERE id = ?"
+    ).get(mediaReply.message.id);
+    assert.equal(storedMedia.message_type, "photo");
+    const storedMeta = JSON.parse(storedMedia.meta_json);
+    assert.equal(
+      fs.readFileSync(path.join(ctx.dir, "outbound-media", storedMeta.localFile)).toString(),
+      "fake-image"
+    );
+
     const recalled = await ctx.service.deleteMessage(
       getConversationById(ctx.db, conversation.id),
       outbound
@@ -225,6 +254,94 @@ test("WhatsApp Web QR login, inbound text, outbound reply and logout", async () 
     assert.equal(afterLogout.configured, false);
     assert.equal(fs.existsSync(ctx.config.whatsappWebSessionPath), false);
   } finally {
+    ctx.cleanup();
+  }
+});
+
+test("WhatsApp Web media upload is stored and served", async () => {
+  const ctx = createTestContext();
+  let server = null;
+  try {
+    await ctx.service.beginLogin();
+    ctx.fake.handlers.get("connection.update")({ connection: "open" });
+    await flush();
+
+    await ctx.service.ingestMessage({
+      key: {
+        remoteJid: "8613800000000@s.whatsapp.net",
+        fromMe: false,
+        id: "IN-MEDIA"
+      },
+      pushName: "张三",
+      message: { conversation: "在吗" },
+      messageTimestamp: Math.floor(Date.now() / 1000)
+    });
+    const conversation = ctx.db.prepare(
+      "SELECT * FROM conversations WHERE telegram_chat_id = ?"
+    ).get("waweb:8613800000000@s.whatsapp.net");
+
+    const app = createApp({
+      db: ctx.db,
+      config: {
+        ...ctx.config,
+        root: path.resolve(__dirname, ".."),
+        publicOrigin: "",
+        trustProxy: false,
+        cookieSecure: false,
+        sessionDays: 7,
+        maxMessageLength: 4096,
+        supportWhatsAppNumber: "",
+        supportTelegramBot: "",
+        supportTelegramUsername: ""
+      },
+      telegram: null,
+      whatsapp: null,
+      whatsappWeb: ctx.service,
+      accounts: null,
+      broadcaster: null,
+      logger: createLogger("error"),
+      translate: null,
+      ai: null
+    });
+    server = await new Promise(resolve => {
+      const listener = app.listen(0, "127.0.0.1", () => resolve(listener));
+    });
+    const base = `http://127.0.0.1:${server.address().port}`;
+
+    const loginResponse = await fetch(`${base}/api/auth/login`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ username: "admin", password: ctx.config.adminPassword })
+    });
+    assert.equal(loginResponse.status, 200);
+    const cookie = loginResponse.headers.getSetCookie()[0].split(";")[0];
+
+    const upload = await fetch(`${base}/api/conversations/${conversation.id}/media`, {
+      method: "POST",
+      headers: {
+        cookie,
+        "content-type": "application/octet-stream",
+        "x-file-name": encodeURIComponent("paste.png"),
+        "x-file-type": "image/png",
+        "x-caption": encodeURIComponent("图片说明")
+      },
+      body: Buffer.from("fake-png")
+    });
+    assert.equal(upload.status, 201);
+    const uploaded = await upload.json();
+    assert.equal(uploaded.message.type, "photo");
+    assert.equal(uploaded.message.body, "图片说明");
+    assert.ok(uploaded.message.meta.localFile);
+    assert.equal(ctx.fake.sent.at(-1).content.image.toString(), "fake-png");
+
+    const served = await fetch(`${base}/api/messages/${uploaded.message.id}/media`, {
+      headers: { cookie }
+    });
+    assert.equal(served.status, 200);
+    assert.equal(served.headers.get("content-type"), "image/png");
+    assert.equal(Buffer.from(await served.arrayBuffer()).toString(), "fake-png");
+  } finally {
+    if (server) await new Promise(resolve => server.close(resolve));
     ctx.cleanup();
   }
 });

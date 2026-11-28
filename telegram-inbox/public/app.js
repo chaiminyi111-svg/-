@@ -1090,7 +1090,10 @@ function appendMessageContent(bubble, message) {
   const meta = message.meta || {};
   const body = String(message.body || "");
   const mediaUrl = `/api/messages/${encodeURIComponent(message.id)}/media`;
-  const canProxyMedia = (state.active?.channel || "telegram") === "telegram" && state.telegramConfigured;
+  const channel = state.active?.channel || "telegram";
+  const canProxyMedia =
+    (channel === "telegram" && state.telegramConfigured) ||
+    (channel === "whatsapp_web" && Boolean(meta.localFile));
 
   if (type === "photo") {
     if (canProxyMedia) {
@@ -1395,10 +1398,11 @@ function renderTelegramState() {
   const input = $("#messageInput");
   const send = $("#sendBtn");
   const attach = $("#attachBtn");
+  const canAttach = channel === "telegram" || channel === "whatsapp_web";
   input.disabled = !configured;
   send.disabled = !configured || state.sending || state.uploading;
   if (attach) {
-    attach.hidden = channel !== "telegram";
+    attach.hidden = !canAttach;
     attach.disabled = !configured || state.uploading;
   }
   input.placeholder = configured
@@ -1406,7 +1410,7 @@ function renderTelegramState() {
     : `未配置 ${label} 凭据，暂时无法发送`;
   const hint = $("#composerHint");
   if (hint) {
-    hint.textContent = channel === "telegram"
+    hint.textContent = canAttach
       ? "Enter 发送 · Shift + Enter 换行 · 可直接粘贴图片"
       : "Enter 发送 · Shift + Enter 换行";
   }
@@ -1827,12 +1831,13 @@ async function sendMessage() {
 
 async function uploadAttachment(file) {
   if (!state.active || !file || state.uploading || state.sending) return;
-  if ((state.active.channel || "telegram") !== "telegram") {
+  const channel = state.active.channel || "telegram";
+  if (!["telegram", "whatsapp_web"].includes(channel)) {
     showToast("当前渠道暂不支持出站附件", "error");
     return;
   }
-  if (!state.telegramConfigured) {
-    showToast("未配置 TELEGRAM_BOT_TOKEN，无法发送附件", "error");
+  if (!activeChannelConfigured()) {
+    showToast(`${channelLabel(channel)} 未连接，无法发送附件`, "error");
     return;
   }
   if (file.size > 20 * 1024 * 1024) {
@@ -4365,11 +4370,15 @@ function clipboardImageFile(event) {
 
 function handlePastedImage(event) {
   const file = clipboardImageFile(event);
-  if (!file || !state.active) return;
+  if (!file) return;
   const target = event.target;
   if (target instanceof HTMLElement) {
     if (target.closest(".modal")) return;
     if (target.closest("input, textarea") && target.id !== "messageInput") return;
+  }
+  if (!state.active) {
+    showToast("请先打开一个会话，再粘贴图片", "error");
+    return;
   }
   event.preventDefault();
   const ext = String(file.type.split("/")[1] || "png").replace("jpeg", "jpg");
@@ -4520,8 +4529,13 @@ function bindEvents() {
   $("#saveCustomerBtn").addEventListener("click", saveCustomerProfile);
 
   $("#attachBtn").addEventListener("click", () => {
-    if (!state.telegramConfigured) {
-      showToast("未配置 TELEGRAM_BOT_TOKEN，无法发送附件", "error");
+    const channel = state.active?.channel || "telegram";
+    if (!["telegram", "whatsapp_web"].includes(channel)) {
+      showToast("当前渠道暂不支持出站附件", "error");
+      return;
+    }
+    if (!activeChannelConfigured()) {
+      showToast(`${channelLabel(channel)} 未连接，无法发送附件`, "error");
       return;
     }
     $("#fileInput").click();
@@ -4545,7 +4559,7 @@ function bindEvents() {
   });
   input.addEventListener("compositionstart", () => { state.composing = true; });
   input.addEventListener("compositionend", () => { state.composing = false; });
-  document.addEventListener("paste", handlePastedImage);
+  window.addEventListener("paste", handlePastedImage, true);
   input.addEventListener("keydown", event => {
     if (event.key === "Enter" && !event.shiftKey && !state.composing && !event.isComposing) {
       event.preventDefault();

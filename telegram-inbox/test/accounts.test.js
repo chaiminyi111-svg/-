@@ -142,6 +142,10 @@ test("account login status and replies are delegated to the account service", as
       calls.push(["sendReply", conversation.id, text, user.id]);
       return { message: { body: text }, conversation };
     },
+    async sendMedia(conversation, file, user) {
+      calls.push(["sendMedia", conversation.id, file.fileName, user.id]);
+      return { message: { type: "photo" }, conversation };
+    },
     async logout() {
       calls.push("logout");
       this.running = false;
@@ -185,6 +189,10 @@ test("account login status and replies are delegated to the account service", as
   const result = await accounts.sendReply(conversation, "收到", ctx.alice, {});
   assert.equal(result.message.body, "收到");
   assert.deepEqual(calls[1], ["sendReply", 42, "收到", ctx.alice.id]);
+
+  const media = await accounts.sendMedia(conversation, { fileName: "paste.png" }, ctx.alice, {});
+  assert.equal(media.message.type, "photo");
+  assert.deepEqual(calls[2], ["sendMedia", 42, "paste.png", ctx.alice.id]);
 
   const deleted = await accounts.deleteMessage(conversation, { id: 7 });
   assert.equal(deleted.remote, true);
