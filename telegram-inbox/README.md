@@ -336,7 +336,7 @@ TRUST_PROXY=true
    ```bash
    SUPPORT_WHATSAPP_NUMBER=8613800138000
    SUPPORT_TELEGRAM_BOT=your_support_bot
-   SUPPORT_GO_MESSAGE=你好，我在 Snapchat 看到你们，想咨询一下。
+   SUPPORT_GO_MESSAGE=Hi! Is it you who I am waiting for? Let's add each other as friends and have a chat!
    ```
 2. 重启服务后，把下面的链接放到 Snapchat 主页、Story 链接或广告落地页：
    - 让客户选择渠道：`https://你的域名/go`
@@ -409,7 +409,7 @@ TRUST_PROXY=true
 | `SUPPORT_WHATSAPP_NUMBER` | 空 | `/go` 落地页的 WhatsApp 号码，国际格式、只填数字 |
 | `SUPPORT_TELEGRAM_BOT` | 空 | `/go` 落地页的 Telegram 机器人用户名，配置后带 `?start=snapchat` |
 | `SUPPORT_TELEGRAM_USERNAME` | 空 | 没有机器人时可填普通 Telegram 用户名 |
-| `SUPPORT_GO_MESSAGE` | 你好，我在 Snapchat 看到你们，想咨询一下。 | 打开聊天后预填的第一句话 |
+| `SUPPORT_GO_MESSAGE` | Hi! Is it you who I am waiting for? Let's add each other as friends and have a chat! | 打开聊天后预填的第一句话 |
 | `LOG_LEVEL` | `info` | `debug` / `info` / `warn` / `error` |
 
 ## 数据与备份

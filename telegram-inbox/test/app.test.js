@@ -379,7 +379,7 @@ test("Telegram support inbox end-to-end API", async t => {
     maxMessageLength: 4096,
     supportWhatsAppNumber: "+86 138-0013-8000",
     supportTelegramBot: "@demo_support_bot",
-    supportGoMessage: "你好，我在 Snapchat 看到你们",
+    supportGoMessage: "Is it you who I am waiting for? Let's chat!",
     logLevel: "error"
   };
 
@@ -424,8 +424,9 @@ test("Telegram support inbox end-to-end API", async t => {
   await t.test("support redirect page exposes WhatsApp and Telegram links", async () => {
     const { response, data } = await apiRequest(base, "/go");
     assert.equal(response.status, 200);
-    assert.match(data.raw, /WhatsApp 客服/);
-    assert.match(data.raw, /Telegram 客服/);
+    assert.match(data.raw, /Please contact me/);
+    assert.match(data.raw, /WhatsApp/);
+    assert.match(data.raw, /Telegram/);
     assert.match(data.raw, /https:\/\/wa\.me\/8613800138000\?text=/);
     assert.match(data.raw, /https:\/\/t\.me\/demo_support_bot\?start=snapchat/);
 

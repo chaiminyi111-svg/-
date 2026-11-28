@@ -76,14 +76,14 @@ function renderSupportGoPage({ whatsappUrl, telegramUrl, prefill, configured }) 
     whatsappUrl
       ? `<a class="channel whatsapp" href="${escapeHtml(whatsappUrl)}">
           <span class="icon">WA</span>
-          <span class="copy"><strong>WhatsApp 客服</strong><small>打开 WhatsApp 后点发送</small></span>
+          <span class="copy"><strong>WhatsApp</strong><small>Open WhatsApp and tap Send</small></span>
           <span class="arrow">→</span>
         </a>`
       : "",
     telegramUrl
       ? `<a class="channel telegram" href="${escapeHtml(telegramUrl)}">
           <span class="icon">TG</span>
-          <span class="copy"><strong>Telegram 客服</strong><small>打开 Telegram 后点开始</small></span>
+          <span class="copy"><strong>Telegram</strong><small>Open Telegram and tap Start</small></span>
           <span class="arrow">→</span>
         </a>`
       : ""
@@ -95,7 +95,7 @@ function renderSupportGoPage({ whatsappUrl, telegramUrl, prefill, configured }) 
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="robots" content="noindex">
-<title>联系客服</title>
+<title>Please contact me</title>
 <style>
   :root { color-scheme: dark; --bg:#0d0b10; --card:#18131e; --line:#2c2533; --text:#f7f2ea; --muted:#a79eaa; --yellow:#fffc00; }
   * { box-sizing: border-box; }
@@ -122,12 +122,12 @@ function renderSupportGoPage({ whatsappUrl, telegramUrl, prefill, configured }) 
 </head>
 <body>
 <main>
-  <div class="badge"><span class="dot"></span>ONLINE SUPPORT</div>
-  <h1>联系客服</h1>
-  <p>选择你常用的聊天方式，我们会尽快回复。</p>
-  ${configured ? `<div class="prefill">打开后已帮你填好：${escapeHtml(prefill)}</div>` : ""}
-  ${buttons ? `<div class="channels">${buttons}</div>` : `<div class="empty">客服通道正在配置中，请稍后再试，或直接回复 Snapchat 消息。</div>`}
-  <div class="note">如果按钮没有反应，请确认手机已安装对应 App。</div>
+  <div class="badge"><span class="dot"></span>LET'S CHAT</div>
+  <h1>Please contact me</h1>
+  <p>Choose how you would like to chat, and I will get back to you as soon as I can.</p>
+  ${configured ? `<div class="prefill">Your first message is ready: ${escapeHtml(prefill)}</div>` : ""}
+  ${buttons ? `<div class="channels">${buttons}</div>` : `<div class="empty">Channels are being set up. Please try again later, or reply to me on Snapchat.</div>`}
+  <div class="note">If the button does not work, make sure the app is installed on your phone.</div>
 </main>
 </body>
 </html>`;
@@ -1662,7 +1662,7 @@ function createApp({ db, config, telegram, whatsapp, whatsappWeb, accounts, broa
     const whatsappNumber = String(config.supportWhatsAppNumber || "").replace(/\D/g, "");
     const telegramBot = String(config.supportTelegramBot || "").replace(/^@/, "").replace(/[^A-Za-z0-9_]/g, "");
     const telegramUsername = String(config.supportTelegramUsername || "").replace(/^@/, "").replace(/[^A-Za-z0-9_]/g, "");
-    const prefill = String(config.supportGoMessage || "你好，我在 Snapchat 看到你们，想咨询一下。");
+    const prefill = String(config.supportGoMessage || "Is it you who I'm waiting for? Let's add each other as friends and have a chat!");
     const whatsappUrl = whatsappNumber
       ? `https://wa.me/${whatsappNumber}?text=${encodeURIComponent(prefill)}`
       : "";
