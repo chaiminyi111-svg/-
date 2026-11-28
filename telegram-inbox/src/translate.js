@@ -393,9 +393,22 @@ function createTranslateService({ db, config = {}, logger } = {}) {
   }
 
   const fallbackProviders = ["google-chrome", "google-web", "google-web-main", "mymemory"];
+  const providerCooldowns = new Map();
+  const PROVIDER_COOLDOWN_MS = 60 * 1000;
 
   function providerCandidates(primary) {
-    return [...new Set([normalizeProvider(primary), ...fallbackProviders])];
+    const all = [...new Set([normalizeProvider(primary), ...fallbackProviders])];
+    const ready = all.filter(provider => (providerCooldowns.get(provider) || 0) <= Date.now());
+    return ready.length ? ready : all;
+  }
+
+  function noteProviderSuccess(provider) {
+    providerCooldowns.delete(provider);
+  }
+
+  function noteProviderFailure(provider, error) {
+    if (error?.code === "TRANSLATION_NOT_CONFIGURED" || error?.code === "INVALID_LANGUAGE") return;
+    providerCooldowns.set(provider, Date.now() + PROVIDER_COOLDOWN_MS);
   }
 
   async function translateViaProvider(provider, text, target, sourceLanguage) {
@@ -434,9 +447,11 @@ function createTranslateService({ db, config = {}, logger } = {}) {
       if (provider === "google" && !currentKey()) continue;
       try {
         const result = await translateViaProvider(provider, text, target, sourceLanguage);
+        noteProviderSuccess(provider);
         return { ...result, provider };
       } catch (error) {
         lastError = error;
+        noteProviderFailure(provider, error);
         logger?.warn(`翻译通道 ${providerLabel(provider)} 失败，尝试备用通道`, error.message);
       }
     }
@@ -454,18 +469,21 @@ function createTranslateService({ db, config = {}, logger } = {}) {
             format: "text"
           });
           const item = data?.data?.detections?.[0]?.[0] || {};
+          noteProviderSuccess(provider);
           return {
             language: normalizeLanguage(item.language || "auto"),
             confidence: Number(item.confidence || 0)
           };
         }
         const result = await translateViaProvider(provider, text, "en", "auto");
+        noteProviderSuccess(provider);
         return {
           language: normalizeLanguage(result.detectedLanguage || "auto"),
           confidence: 1
         };
       } catch (error) {
         lastError = error;
+        noteProviderFailure(provider, error);
         logger?.warn(`语言检测通道 ${providerLabel(provider)} 失败，尝试备用通道`, error.message);
       }
     }
@@ -483,16 +501,16 @@ function createTranslateService({ db, config = {}, logger } = {}) {
   async function translateInbound(text, options = {}) {
     if (!configured() || !isTranslatableText(text)) return null;
     const target = normalizeLanguage(options.target || defaultTarget);
-    const detection = await detect(text);
-    if (!detection.language || detection.language === "auto") {
+    const result = await translate(text, target, "auto");
+    const language = normalizeLanguage(result.detectedLanguage || "auto");
+    if (!language || language === "auto") {
       return { language: null, translatedBody: null, translationLanguage: null };
     }
-    if (sameLanguage(detection.language, target)) {
-      return { language: detection.language, translatedBody: null, translationLanguage: null };
+    if (sameLanguage(language, target)) {
+      return { language, translatedBody: null, translationLanguage: null };
     }
-    const result = await translate(text, target, detection.language);
     return {
-      language: detection.language,
+      language,
       translatedBody: result.text || null,
       translationLanguage: target
     };
@@ -518,8 +536,8 @@ function createTranslateService({ db, config = {}, logger } = {}) {
       }
     }
 
-    const detection = await detect(text);
-    const sourceLanguage = detection.language;
+    const result = await translate(text, target, "auto");
+    const sourceLanguage = normalizeLanguage(result.detectedLanguage || "auto");
     if (sameLanguage(sourceLanguage, target)) {
       return {
         text,
@@ -528,7 +546,6 @@ function createTranslateService({ db, config = {}, logger } = {}) {
       };
     }
 
-    const result = await translate(text, target, sourceLanguage);
     return {
       text: result.text,
       language: target,

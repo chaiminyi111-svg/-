@@ -207,6 +207,14 @@ server {
     server_name ${DOMAIN:-_};
     client_max_body_size 30m;
 
+    gzip on;
+    gzip_vary on;
+    gzip_proxied any;
+    gzip_comp_level 5;
+    gzip_min_length 1024;
+    gzip_types text/plain text/css application/json application/javascript
+               application/xml application/rss+xml image/svg+xml;
+
     location / {
         proxy_pass http://127.0.0.1:${PORT};
         proxy_http_version 1.1;

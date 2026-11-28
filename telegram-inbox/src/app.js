@@ -1,6 +1,7 @@
 const path = require("node:path");
 const { Readable } = require("node:stream");
 const express = require("express");
+const compression = require("compression");
 
 const {
   attachUser,
@@ -136,6 +137,14 @@ function createApp({ db, config, telegram, whatsapp, whatsappWeb, accounts, broa
   const app = express();
   app.disable("x-powered-by");
   app.set("trust proxy", config.trustProxy ? 1 : false);
+  app.use(compression({
+    threshold: 1024,
+    level: 5,
+    filter: (req, res) => {
+      if (String(res.getHeader("Content-Type") || "").includes("text/event-stream")) return false;
+      return compression.filter(req, res);
+    }
+  }));
 
   const loginAttempts = new Map();
   const admin = createAdminService({ db, config, logger, telegram, whatsapp, whatsappWeb, accounts });

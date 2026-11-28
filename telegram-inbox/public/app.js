@@ -109,6 +109,7 @@ const state = {
   active: null,
   messages: [],
   hasMore: false,
+  messageCache: new Map(),
   filters: { scope: "all", status: "open", q: "" },
   mode: "shared",
   personal: { enabled: false, channels: [], accounts: [], timer: null, loading: false },
@@ -258,11 +259,13 @@ async function enterInbox() {
   }
   showInbox();
   if (state.me.role === "admin") await loadUsers();
-  await loadTranslateConfig();
-  await loadAiPreferences();
-  await loadConversations();
-  await loadPersonalAccounts({ silent: true });
-  await loadSidebarStats();
+  await Promise.all([
+    loadTranslateConfig(),
+    loadAiPreferences(),
+    loadConversations(),
+    loadPersonalAccounts({ silent: true }),
+    loadSidebarStats()
+  ]);
   connectRealtime();
   startFallbackPolling();
 }
@@ -544,6 +547,7 @@ function showLogin() {
   state.activeId = null;
   state.active = null;
   state.messages = [];
+  state.messageCache.clear();
   state.conversations = [];
   state.counts = {};
   state.filters = { scope: "all", status: "open", q: "" };
@@ -830,6 +834,41 @@ function upsertConversation(conversation) {
   if (state.activeId === conversation.id) state.active = conversation;
 }
 
+function rememberThread(id, messages = state.messages, hasMore = state.hasMore) {
+  if (!id) return;
+  state.messageCache.delete(id);
+  state.messageCache.set(id, { messages: messages.slice(), hasMore });
+  while (state.messageCache.size > 20) {
+    state.messageCache.delete(state.messageCache.keys().next().value);
+  }
+}
+
+function forgetThread(id) {
+  if (id) state.messageCache.delete(id);
+}
+
+function mergeMessage(list, message) {
+  const original = message.meta?.originalText || message.body;
+  const optimisticIndex = list.findIndex(item =>
+    item.optimistic && item.direction === "out" && item.body === original
+  );
+  if (optimisticIndex >= 0) list.splice(optimisticIndex, 1);
+
+  const index = list.findIndex(item => item.id === message.id);
+  if (index >= 0) list[index] = message;
+  else list.push(message);
+  list.sort((a, b) => {
+    return new Date(a.createdAt || 0) - new Date(b.createdAt || 0) || a.id - b.id;
+  });
+}
+
+function dropOptimisticMessage(id, conversationId) {
+  const matches = item => item.optimistic && item.id === id;
+  if (state.activeId === conversationId) state.messages = state.messages.filter(item => !matches(item));
+  const cached = state.messageCache.get(conversationId);
+  if (cached) cached.messages = cached.messages.filter(item => !matches(item));
+}
+
 async function selectConversation(id) {
   if (!id) return;
   if (state.activeId === id) {
@@ -842,11 +881,16 @@ async function selectConversation(id) {
     return;
   }
 
+  if (state.activeId && state.messages.length) {
+    rememberThread(state.activeId);
+  }
+
   const token = ++state.threadToken;
   state.activeId = id;
   state.active = state.conversations.find(item => item.id === id) || null;
-  state.messages = [];
-  state.hasMore = false;
+  const cached = state.messageCache.get(id);
+  state.messages = cached ? cached.messages.slice() : [];
+  state.hasMore = cached ? cached.hasMore : false;
   state.customerDirty = false;
   state.customerTags = [...(state.active?.tags || [])];
   state.aiSuggestion = null;
@@ -856,28 +900,32 @@ async function selectConversation(id) {
   $("#chatEmpty").hidden = true;
   $("#chatPanel").hidden = false;
   renderChatHeader();
-  renderMessages();
+  renderMessages({ scrollToBottom: Boolean(cached) });
 
-  if (!state.active) {
-    try {
-      const data = await api(`/api/conversations/${id}`);
+  let detailFailed = false;
+  const detailPromise = state.active
+    ? Promise.resolve()
+    : api(`/api/conversations/${id}`).then(data => {
       if (token !== state.threadToken) return;
       state.active = data.conversation;
       upsertConversation(data.conversation);
       renderChatHeader();
-    } catch (error) {
+    }).catch(error => {
       if (token !== state.threadToken) return;
+      detailFailed = true;
       state.activeId = null;
       state.active = null;
       renderChatHeader();
       showToast(error.message, "error");
-      return;
-    }
-  }
+    });
 
-  await loadMessages(id, token);
-  await loadAiSuggestion(id, token);
+  const messagesPromise = loadMessages(id, token);
+  loadAiSuggestion(id, token);
+
+  await detailPromise;
+  if (token !== state.threadToken || detailFailed) return;
   markRead(id);
+  await messagesPromise;
 }
 
 async function loadMessages(id, token) {
@@ -886,6 +934,7 @@ async function loadMessages(id, token) {
     if (state.activeId !== id || token !== state.threadToken) return;
     state.messages = data.messages;
     state.hasMore = data.hasMore;
+    rememberThread(id, data.messages, data.hasMore);
     renderMessages({ scrollToBottom: true });
   } catch (error) {
     if (token === state.threadToken && error.status !== 401) {
@@ -916,6 +965,7 @@ async function loadMoreMessages() {
 
     state.messages = [...older, ...state.messages];
     state.hasMore = data.hasMore;
+    rememberThread(id, state.messages, state.hasMore);
     renderMessages();
     list.scrollTop = previousTop + (list.scrollHeight - previousHeight);
   } catch (error) {
@@ -965,7 +1015,7 @@ function renderMessages(options = {}) {
 function buildMessageRow(message) {
   const out = message.direction === "out";
   const row = document.createElement("div");
-  row.className = "message-row " + (out ? "out" : "in");
+  row.className = "message-row " + (out ? "out" : "in") + (message.optimistic ? " pending" : "");
 
   if (!out) {
     const avatar = document.createElement("div");
@@ -1003,19 +1053,23 @@ function buildMessageRow(message) {
     time.appendChild(delivery);
   }
 
-  const actions = document.createElement("div");
-  actions.className = "message-actions";
-  const remove = document.createElement("button");
-  remove.type = "button";
-  remove.className = "message-action";
-  remove.dataset.messageAction = "delete";
-  remove.dataset.messageId = String(message.id);
-  remove.dataset.direction = message.direction;
-  remove.textContent = out ? "撤回" : "删除";
-  remove.title = out ? "撤回这条消息" : "删除对方这条消息";
-  actions.appendChild(remove);
+  stack.append(bubble, time);
 
-  stack.append(bubble, time, actions);
+  if (!message.optimistic) {
+    const actions = document.createElement("div");
+    actions.className = "message-actions";
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "message-action";
+    remove.dataset.messageAction = "delete";
+    remove.dataset.messageId = String(message.id);
+    remove.dataset.direction = message.direction;
+    remove.textContent = out ? "撤回" : "删除";
+    remove.title = out ? "撤回这条消息" : "删除对方这条消息";
+    actions.appendChild(remove);
+    stack.appendChild(actions);
+  }
+
   row.appendChild(stack);
   return row;
 }
@@ -1400,6 +1454,7 @@ async function deleteActiveConversation() {
   try {
     await api(`/api/conversations/${conversation.id}`, { method: "DELETE" });
     state.threadToken += 1;
+    forgetThread(conversation.id);
     state.activeId = null;
     state.active = null;
     state.messages = [];
@@ -1501,6 +1556,7 @@ function handleRealtime(event) {
 
   if (event.type === "conversation.removed") {
     state.conversations = state.conversations.filter(item => item.id !== event.conversationId);
+    forgetThread(event.conversationId);
     if (state.activeId === event.conversationId) {
       state.threadToken += 1;
       state.activeId = null;
@@ -1603,15 +1659,11 @@ function handleRealtime(event) {
 }
 
 function upsertMessage(message) {
-  const index = state.messages.findIndex(item => item.id === message.id);
-  if (index >= 0) state.messages[index] = message;
-  else state.messages.push(message);
-
-  state.messages.sort((a, b) => {
-    const left = new Date(a.createdAt || 0).getTime();
-    const right = new Date(b.createdAt || 0).getTime();
-    return left - right || a.id - b.id;
-  });
+  mergeMessage(state.messages, message);
+  const cached = state.messageCache.get(message.conversationId);
+  if (cached && state.activeId !== message.conversationId) {
+    mergeMessage(cached.messages, message);
+  }
 }
 
 function scheduleRefresh() {
@@ -1641,6 +1693,7 @@ async function refreshActiveThread() {
       return new Date(a.createdAt || 0) - new Date(b.createdAt || 0) || a.id - b.id;
     });
     if (state.messages.length <= data.messages.length) state.hasMore = data.hasMore;
+    rememberThread(id, state.messages, state.hasMore);
     const nearBottom = isNearBottom();
     renderMessages({ scrollToBottom: nearBottom });
     markRead(id, { silent: true });
@@ -1677,29 +1730,53 @@ async function sendMessage() {
   const input = $("#messageInput");
   const text = input.value.trim();
   if (!text) return;
-  const channel = state.active.channel || "telegram";
+  const conversation = state.active;
+  const conversationId = conversation.id;
+  const channel = conversation.channel || "telegram";
   if (!activeChannelConfigured()) {
-    showToast(state.active.accountId
+    showToast(conversation.accountId
       ? "该个人号未登录，请到「我的个人号」中扫码"
       : `未配置 ${channelLabel(channel)} 凭据，无法发送`, "error");
     return;
   }
+
+  const targetLanguage = state.translate?.configured
+    ? ($("#replyLanguage")?.value || "auto")
+    : "auto";
+  const tempId = `pending-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 
   state.sending = true;
   const button = $("#sendBtn");
   button.disabled = true;
   button.textContent = "发送中…";
 
+  state.messages.push({
+    id: tempId,
+    conversationId,
+    direction: "out",
+    senderId: state.me?.id,
+    senderName: state.me?.displayName || state.me?.username || "我",
+    body: text,
+    type: "text",
+    meta: {},
+    deliveryStatus: "sending",
+    createdAt: new Date().toISOString(),
+    optimistic: true
+  });
+  renderMessages({ scrollToBottom: true });
+  input.value = "";
+  updateCharCount();
+  autoResize(input);
+  input.focus();
+
   try {
-    const targetLanguage = state.translate?.configured
-      ? ($("#replyLanguage")?.value || "auto")
-      : "auto";
-    const data = await api(`/api/conversations/${state.active.id}/messages`, {
+    const data = await api(`/api/conversations/${conversationId}/messages`, {
       method: "POST",
       body: { text, targetLanguage }
     });
+    dropOptimisticMessage(tempId, conversationId);
 
-    if (state.activeId === data.conversation.id) {
+    if (state.activeId === conversationId) {
       state.active = data.conversation;
       upsertConversation(data.conversation);
       upsertMessage(data.message);
@@ -1707,12 +1784,21 @@ async function sendMessage() {
       renderChatHeader();
       renderConversationList();
       scheduleSidebarStats();
+    } else {
+      upsertConversation(data.conversation);
+      const cached = state.messageCache.get(conversationId);
+      if (cached) mergeMessage(cached.messages, data.message);
+      renderConversationList();
     }
-    input.value = "";
-    updateCharCount();
-    autoResize(input);
     showToast("已发送", "success");
   } catch (error) {
+    dropOptimisticMessage(tempId, conversationId);
+    if (!input.value.trim()) {
+      input.value = text;
+      updateCharCount();
+      autoResize(input);
+    }
+    if (state.activeId === conversationId) renderMessages();
     showToast(error.message, "error");
   } finally {
     state.sending = false;
@@ -4217,11 +4303,17 @@ function statusLabel(status) {
 }
 
 function deliveryStatusLabel(status) {
-  return { sent: "已发送", delivered: "已送达", read: "对方已读", failed: "发送失败" }[status] || "";
+  return {
+    sending: "发送中",
+    sent: "已发送",
+    delivered: "已送达",
+    read: "对方已读",
+    failed: "发送失败"
+  }[status] || "";
 }
 
 function deliveryStatusIcon(status) {
-  return { sent: "✓", delivered: "✓", read: "✓✓", failed: "!" }[status] || "✓";
+  return { sending: "…", sent: "✓", delivered: "✓", read: "✓✓", failed: "!" }[status] || "✓";
 }
 
 function updateCharCount() {
