@@ -95,7 +95,7 @@ function renderSupportGoPage({ whatsappUrl, telegramUrl }) {
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="robots" content="noindex">
-<title>Please contact me</title>
+<title>Want to video chat with me?</title>
 <style>
   :root { color-scheme: dark; --bg:#0d0b10; --card:#18131e; --line:#2c2533; --text:#f7f2ea; --muted:#a79eaa; --yellow:#fffc00; }
   * { box-sizing: border-box; }
@@ -122,7 +122,7 @@ function renderSupportGoPage({ whatsappUrl, telegramUrl }) {
 <body>
 <main>
   <div class="badge"><span class="dot"></span>LET'S CHAT</div>
-  <h1>Please contact me</h1>
+  <h1>Want to video chat with me?</h1>
   <p>Choose how you would like to chat, and I will get back to you as soon as I can.</p>
   ${buttons ? `<div class="channels">${buttons}</div>` : `<div class="empty">Channels are being set up. Please try again later, or reply to me on Snapchat.</div>`}
   <div class="note">If the button does not work, make sure the app is installed on your phone.</div>

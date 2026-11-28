@@ -423,7 +423,7 @@ test("Telegram support inbox end-to-end API", async t => {
   await t.test("support redirect page exposes WhatsApp and Telegram links", async () => {
     const { response, data } = await apiRequest(base, "/go");
     assert.equal(response.status, 200);
-    assert.match(data.raw, /Please contact me/);
+    assert.match(data.raw, /Want to video chat with me\?/);
     assert.match(data.raw, /WhatsApp/);
     assert.match(data.raw, /Telegram/);
     assert.match(data.raw, /https:\/\/wa\.me\/8613800138000/);
