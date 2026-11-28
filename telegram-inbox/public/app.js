@@ -725,7 +725,10 @@ function renderConversationList() {
   for (const conversation of state.conversations) {
     const item = document.createElement("button");
     item.type = "button";
-    item.className = "conversation-item" + (conversation.id === state.activeId ? " active" : "");
+    const selected = conversation.id === state.activeId;
+    item.className = "conversation-item" + (selected ? " active" : "");
+    item.dataset.conversationId = String(conversation.id);
+    item.setAttribute("aria-current", selected ? "true" : "false");
     item.addEventListener("click", () => selectConversation(conversation.id));
 
     const avatar = document.createElement("div");
@@ -813,6 +816,15 @@ function renderConversationList() {
   updateDocumentTitle();
 }
 
+function updateConversationSelection() {
+  const activeId = String(state.activeId ?? "");
+  document.querySelectorAll("#conversationList .conversation-item").forEach(item => {
+    const selected = item.dataset.conversationId === activeId;
+    item.classList.toggle("active", selected);
+    item.setAttribute("aria-current", selected ? "true" : "false");
+  });
+}
+
 function updateDocumentTitle() {
   const unread = state.conversations.reduce((sum, item) => sum + Number(item.unreadCount || 0), 0);
   document.title = unread
@@ -872,6 +884,7 @@ function dropOptimisticMessage(id, conversationId) {
 async function selectConversation(id) {
   if (!id) return;
   if (state.activeId === id) {
+    updateConversationSelection();
     document.body.classList.add("mobile-chat-open");
     $("#chatEmpty").hidden = true;
     $("#chatPanel").hidden = false;
@@ -887,6 +900,7 @@ async function selectConversation(id) {
 
   const token = ++state.threadToken;
   state.activeId = id;
+  updateConversationSelection();
   state.active = state.conversations.find(item => item.id === id) || null;
   const cached = state.messageCache.get(id);
   state.messages = cached ? cached.messages.slice() : [];
