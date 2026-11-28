@@ -392,43 +392,28 @@ function createTranslateService({ db, config = {}, logger } = {}) {
     };
   }
 
-  async function detect(text) {
-    if (!providerRequiresKey(currentProvider())) {
-      const result = await translate(text, "en", "auto");
-      return { language: result.detectedLanguage || "auto", confidence: 1 };
-    }
-    const data = await request("/language/translate/v2/detect", {
-      q: String(text || "").slice(0, 10000),
-      format: "text"
-    });
-    const item = data?.data?.detections?.[0]?.[0] || {};
-    return {
-      language: normalizeLanguage(item.language || "auto"),
-      confidence: Number(item.confidence || 0)
-    };
+  const fallbackProviders = ["google-chrome", "google-web", "google-web-main", "mymemory"];
+
+  function providerCandidates(primary) {
+    return [...new Set([normalizeProvider(primary), ...fallbackProviders])];
   }
 
-  async function translate(text, target, sourceLanguage = "auto") {
-    const targetLanguage = normalizeLanguage(target);
-    if (targetLanguage === "auto") {
-      throw new TranslationError("请选择目标语言", "INVALID_LANGUAGE");
-    }
-    const provider = currentProvider();
+  async function translateViaProvider(provider, text, target, sourceLanguage) {
     if (provider === "google-web") {
-      return webRequest(text, targetLanguage, sourceLanguage);
+      return webRequest(text, target, sourceLanguage);
     }
     if (provider === "google-web-main") {
-      return webRequest(text, targetLanguage, sourceLanguage, webMainApiBase);
+      return webRequest(text, target, sourceLanguage, webMainApiBase);
     }
     if (provider === "google-chrome") {
-      return chromeRequest(text, targetLanguage, sourceLanguage);
+      return chromeRequest(text, target, sourceLanguage);
     }
     if (provider === "mymemory") {
-      return myMemoryRequest(text, targetLanguage, sourceLanguage);
+      return myMemoryRequest(text, target, sourceLanguage);
     }
     const payload = {
       q: String(text || ""),
-      target: targetLanguage,
+      target,
       format: "text"
     };
     if (sourceLanguage && sourceLanguage !== "auto") {
@@ -439,8 +424,60 @@ function createTranslateService({ db, config = {}, logger } = {}) {
     return {
       text: decodeEntities(item.translatedText || ""),
       detectedLanguage: normalizeLanguage(item.detectedSourceLanguage || sourceLanguage || "auto"),
-      targetLanguage
+      targetLanguage: target
     };
+  }
+
+  async function withFallback(text, target, sourceLanguage) {
+    let lastError = null;
+    for (const provider of providerCandidates(currentProvider())) {
+      if (provider === "google" && !currentKey()) continue;
+      try {
+        const result = await translateViaProvider(provider, text, target, sourceLanguage);
+        return { ...result, provider };
+      } catch (error) {
+        lastError = error;
+        logger?.warn(`翻译通道 ${providerLabel(provider)} 失败，尝试备用通道`, error.message);
+      }
+    }
+    throw lastError || new TranslationError("没有可用的翻译通道", "TRANSLATION_NOT_CONFIGURED");
+  }
+
+  async function detect(text) {
+    let lastError = null;
+    for (const provider of providerCandidates(currentProvider())) {
+      if (provider === "google" && !currentKey()) continue;
+      try {
+        if (provider === "google") {
+          const data = await request("/language/translate/v2/detect", {
+            q: String(text || "").slice(0, 10000),
+            format: "text"
+          });
+          const item = data?.data?.detections?.[0]?.[0] || {};
+          return {
+            language: normalizeLanguage(item.language || "auto"),
+            confidence: Number(item.confidence || 0)
+          };
+        }
+        const result = await translateViaProvider(provider, text, "en", "auto");
+        return {
+          language: normalizeLanguage(result.detectedLanguage || "auto"),
+          confidence: 1
+        };
+      } catch (error) {
+        lastError = error;
+        logger?.warn(`语言检测通道 ${providerLabel(provider)} 失败，尝试备用通道`, error.message);
+      }
+    }
+    throw lastError || new TranslationError("无法检测消息语言", "TRANSLATION_NOT_CONFIGURED");
+  }
+
+  async function translate(text, target, sourceLanguage = "auto") {
+    const targetLanguage = normalizeLanguage(target);
+    if (targetLanguage === "auto") {
+      throw new TranslationError("请选择目标语言", "INVALID_LANGUAGE");
+    }
+    return withFallback(text, targetLanguage, sourceLanguage);
   }
 
   async function translateInbound(text, options = {}) {

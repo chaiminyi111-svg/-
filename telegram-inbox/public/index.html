@@ -728,7 +728,7 @@
             maxlength="200"
           >
         </label>
-        <p class="channel-note">官方 API 需要 Key，保存前会验证。其余通道均无需 Key：Google 网页翻译、Chrome 翻译接口、MyMemory。它们都不是 Google 官方 API，可能限流或失效；MyMemory 单次最多约 500 字符，适合作为备用。</p>
+        <p class="channel-note">官方 API 需要 Key，保存前会验证。其余通道均无需 Key：Google 网页翻译、Chrome 翻译接口、MyMemory。它们都不是 Google 官方 API，可能限流或失效；当前通道失败时会自动尝试其他免费通道。</p>
         <div class="channel-actions">
           <button class="primary" type="submit" id="translateSaveBtn">验证并保存</button>
           <button class="ghost" type="button" id="translateClearBtn" hidden>清除 Key</button>

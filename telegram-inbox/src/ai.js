@@ -527,6 +527,7 @@ function createAIService({ db, config = {}, logger, broadcaster, sendReply }) {
 
     const skip = reason => {
       updateMessageStatus(latest.id, "skipped", reason);
+      logger?.info(`AI 自动回复跳过（会话 ${conversationId}）：${reason}`);
       return { status: "skipped", reason };
     };
 
@@ -570,6 +571,7 @@ function createAIService({ db, config = {}, logger, broadcaster, sendReply }) {
       reply = await requestCompletion(buildPrompt(conversation, assignee, context));
     } catch (error) {
       updateMessageStatus(latest.id, "error", error.message);
+      logger?.warn("AI 生成回复失败", error.message);
       const summary = toConversationSummary(getConversationById(db, conversationId));
       emit({
         type: "ai.error",
