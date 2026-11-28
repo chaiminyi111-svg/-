@@ -61,6 +61,7 @@ function createTestContext(options = {}) {
     logger: createLogger("error"),
     broadcaster: event => events.push(event),
     translate: null,
+    mediaDownloader: options.mediaDownloader || null,
     clientFactory: async () => fake.client,
     authLoader: async () => ({ state: {}, saveCreds: async () => {} })
   });
@@ -90,7 +91,15 @@ test("WhatsApp Web helpers parse private JIDs and message types", () => {
   assert.equal(isPrivateJid("status@broadcast"), false);
   assert.equal(jidNumber("8613800000000@s.whatsapp.net"), "8613800000000");
   assert.equal(contentOf({ message: { conversation: "你好" } }).body, "你好");
+  const image = contentOf({
+    message: { imageMessage: { caption: "看图", mimetype: "image/png", fileLength: 12 } }
+  });
+  assert.equal(image.type, "photo");
+  assert.equal(image.body, "看图");
+  assert.equal(image.meta.media, "image");
+  assert.equal(image.meta.mimeType, "image/png");
   assert.equal(contentOf({ message: { imageMessage: {} } }).body, "[图片]");
+  assert.equal(contentOf({ message: { stickerMessage: {} } }).type, "sticker");
 });
 
 test("WhatsApp Web reuses a stored session when Baileys leaves registered false", async () => {
@@ -259,7 +268,7 @@ test("WhatsApp Web QR login, inbound text, outbound reply and logout", async () 
 });
 
 test("WhatsApp Web media upload is stored and served", async () => {
-  const ctx = createTestContext();
+  const ctx = createTestContext({ mediaDownloader: async () => Buffer.from("inbound-png") });
   let server = null;
   try {
     await ctx.service.beginLogin();
@@ -276,6 +285,26 @@ test("WhatsApp Web media upload is stored and served", async () => {
       message: { conversation: "在吗" },
       messageTimestamp: Math.floor(Date.now() / 1000)
     });
+    const inboundMedia = await ctx.service.ingestMessage({
+      key: {
+        remoteJid: "8613800000000@s.whatsapp.net",
+        fromMe: false,
+        id: "IN-IMAGE"
+      },
+      pushName: "张三",
+      message: {
+        imageMessage: {
+          caption: "收到图片",
+          mimetype: "image/png",
+          fileLength: 11
+        }
+      },
+      messageTimestamp: Math.floor(Date.now() / 1000) + 1
+    });
+    assert.equal(inboundMedia.message.type, "photo");
+    assert.equal(inboundMedia.message.body, "收到图片");
+    assert.ok(inboundMedia.message.meta.localFile);
+
     const conversation = ctx.db.prepare(
       "SELECT * FROM conversations WHERE telegram_chat_id = ?"
     ).get("waweb:8613800000000@s.whatsapp.net");
@@ -340,6 +369,13 @@ test("WhatsApp Web media upload is stored and served", async () => {
     assert.equal(served.status, 200);
     assert.equal(served.headers.get("content-type"), "image/png");
     assert.equal(Buffer.from(await served.arrayBuffer()).toString(), "fake-png");
+
+    const inboundServed = await fetch(`${base}/api/messages/${inboundMedia.message.id}/media`, {
+      headers: { cookie }
+    });
+    assert.equal(inboundServed.status, 200);
+    assert.equal(inboundServed.headers.get("content-type"), "image/png");
+    assert.equal(Buffer.from(await inboundServed.arrayBuffer()).toString(), "inbound-png");
   } finally {
     if (server) await new Promise(resolve => server.close(resolve));
     ctx.cleanup();

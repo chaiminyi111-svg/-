@@ -1676,7 +1676,8 @@ function createApp({ db, config, telegram, whatsapp, whatsappWeb, accounts, broa
       const meta = safeJsonParse(message.meta_json, {});
       const localFile = typeof meta.localFile === "string" ? path.basename(meta.localFile) : "";
       if (!localFile) return jsonError(res, 501, "当前消息没有可用的本地媒体");
-      const filePath = path.join(config.dataDir, "outbound-media", localFile);
+      const mediaDir = message.direction === "in" ? "inbound-media" : "outbound-media";
+      const filePath = path.join(config.dataDir, mediaDir, localFile);
       let stat;
       try {
         stat = fs.statSync(filePath);
@@ -1690,7 +1691,7 @@ function createApp({ db, config, telegram, whatsapp, whatsappWeb, accounts, broa
         "application/octet-stream";
       const safeInline = /^(image\/(jpeg|jpg|png|gif|webp|bmp|avif)|video\/(mp4|webm|ogg)|audio\/(mpeg|mp4|ogg|wav|webm))$/i
         .test(mimeType);
-      const inline = safeInline && ["photo", "video", "audio", "voice"].includes(message.message_type);
+      const inline = safeInline && ["photo", "video", "audio", "voice", "sticker"].includes(message.message_type);
       res.setHeader("Content-Type", mimeType);
       res.setHeader("Content-Length", String(stat.size));
       res.setHeader("X-Content-Type-Options", "nosniff");

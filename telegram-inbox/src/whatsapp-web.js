@@ -14,6 +14,8 @@ const {
 
 const CHANNEL = "whatsapp_web";
 const RECONNECT_DELAY_MS = 5000;
+const INBOUND_MEDIA_TIMEOUT_MS = 15000;
+const MAX_INBOUND_MEDIA_BYTES = 20 * 1024 * 1024;
 
 function silentLogger() {
   const silent = {
@@ -113,6 +115,19 @@ function mediaExtension(fileName, mimeType) {
   }[type] || ".bin";
 }
 
+function withTimeout(task, ms, message) {
+  let timer = null;
+  return Promise.race([
+    Promise.resolve().then(task),
+    new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error(message)), ms);
+      timer.unref?.();
+    })
+  ]).finally(() => {
+    if (timer) clearTimeout(timer);
+  });
+}
+
 function timestampOf(message) {
   const raw = message?.messageTimestamp;
   const seconds = typeof raw === "object" && typeof raw?.toNumber === "function"
@@ -124,22 +139,47 @@ function timestampOf(message) {
 
 function contentOf(message) {
   const payload = message?.message || {};
+  const media = payload.imageMessage
+    ? { type: "photo", value: payload.imageMessage, media: "image", mimeType: "image/jpeg", placeholder: "[图片]" }
+    : payload.videoMessage
+      ? { type: "video", value: payload.videoMessage, media: "video", mimeType: "video/mp4", placeholder: "[视频]" }
+      : payload.audioMessage
+        ? { type: "audio", value: payload.audioMessage, media: "audio", mimeType: "audio/ogg", placeholder: "[语音]" }
+        : payload.documentMessage
+          ? { type: "document", value: payload.documentMessage, media: "document", mimeType: "application/octet-stream", placeholder: "[文件]" }
+          : payload.stickerMessage
+            ? { type: "sticker", value: payload.stickerMessage, media: "sticker", mimeType: "image/webp", placeholder: "[贴纸]" }
+            : null;
+
+  if (media) {
+    const caption = String(media.value.caption || "").trim();
+    const fileName = String(media.value.fileName || "").trim();
+    const placeholder = media.type === "document" && fileName ? `[文件] ${fileName}` : media.placeholder;
+    const rawLength = media.value.fileLength;
+    const fileLength = typeof rawLength === "object" && typeof rawLength?.toNumber === "function"
+      ? rawLength.toNumber()
+      : Number(rawLength);
+    return {
+      type: media.type,
+      body: caption || placeholder,
+      meta: {
+        media: media.media,
+        mimeType: media.value.mimetype || media.mimeType,
+        fileName: fileName || null,
+        fileLength: Number.isFinite(fileLength) && fileLength > 0 ? fileLength : null,
+        ...(media.type === "audio" ? { ptt: Boolean(media.value.ptt) } : {})
+      }
+    };
+  }
+
   const text = String(
     payload.conversation ||
     payload.extendedTextMessage?.text ||
-    payload.imageMessage?.caption ||
-    payload.videoMessage?.caption ||
-    payload.documentMessage?.caption ||
     payload.buttonsResponseMessage?.selectedButtonId ||
     payload.listResponseMessage?.title ||
     ""
   ).trim();
   if (text) return { type: "text", body: text, meta: {} };
-  if (payload.imageMessage) return { type: "media", body: "[图片]", meta: { media: "image" } };
-  if (payload.videoMessage) return { type: "media", body: "[视频]", meta: { media: "video" } };
-  if (payload.audioMessage) return { type: "media", body: "[语音]", meta: { media: "audio" } };
-  if (payload.documentMessage) return { type: "media", body: "[文件]", meta: { media: "document" } };
-  if (payload.stickerMessage) return { type: "media", body: "[贴纸]", meta: { media: "sticker" } };
   if (payload.locationMessage || payload.liveLocationMessage) {
     return { type: "location", body: "[位置]", meta: {} };
   }
@@ -170,6 +210,7 @@ function createWhatsAppWebService({
   clientFactory,
   authLoader,
   qrEncoder,
+  mediaDownloader = null,
   account = null
 }) {
   const enabled = Boolean(config.whatsappWebEnabled);
@@ -517,6 +558,8 @@ function createWhatsAppWebService({
       }
     }
 
+    const storedMedia = await downloadInboundMedia(message, content);
+
     const result = withTransaction(db, () => {
       let conversation = db.prepare(
         "SELECT * FROM conversations WHERE telegram_chat_id = ?"
@@ -562,7 +605,13 @@ function createWhatsAppWebService({
         number,
         messageId,
         senderJid: message.key.participant || jid,
-        ...content.meta
+        ...content.meta,
+        ...(storedMedia ? {
+          localFile: storedMedia.localFile,
+          fileName: storedMedia.fileName || content.meta.fileName,
+          mimeType: storedMedia.mimeType,
+          fileSize: storedMedia.fileSize
+        } : {})
       };
       const insert = db.prepare(
         `INSERT OR IGNORE INTO messages
@@ -700,14 +749,56 @@ function createWhatsAppWebService({
     return { message, conversation: summary };
   }
 
-  function saveOutboundMedia(file) {
-    const dir = path.join(config.dataDir, "outbound-media");
+  function saveMediaFile(subdir, buffer, fileName, mimeType) {
+    const dir = path.join(config.dataDir, subdir);
     fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
     try { fs.chmodSync(dir, 0o700); } catch {}
-    const localFile = `${Date.now()}-${crypto.randomUUID()}${mediaExtension(file.fileName, file.mimeType)}`;
+    const localFile = `${Date.now()}-${crypto.randomUUID()}${mediaExtension(fileName, mimeType)}`;
     const fullPath = path.join(dir, localFile);
-    fs.writeFileSync(fullPath, file.buffer, { mode: 0o600 });
-    return { localFile, fullPath };
+    fs.writeFileSync(fullPath, buffer, { mode: 0o600 });
+    return { localFile, fullPath, fileName, mimeType, fileSize: buffer.length };
+  }
+
+  function saveOutboundMedia(file) {
+    return saveMediaFile("outbound-media", file.buffer, file.fileName, file.mimeType);
+  }
+
+  async function downloadInboundMedia(message, content) {
+    if (!content?.meta?.media) return null;
+    let buffer;
+    try {
+      if (mediaDownloader) {
+        buffer = await withTimeout(
+          () => mediaDownloader(message),
+          INBOUND_MEDIA_TIMEOUT_MS,
+          "WhatsApp 媒体下载超时"
+        );
+      } else {
+        const baileys = await loadBaileys();
+        if (typeof baileys.downloadMediaMessage !== "function") return null;
+        const context = socket?.updateMediaMessage
+          ? { logger: silentLogger(), reuploadRequest: socket.updateMediaMessage.bind(socket) }
+          : undefined;
+        buffer = await withTimeout(
+          () => baileys.downloadMediaMessage(message, "buffer", {}, context),
+          INBOUND_MEDIA_TIMEOUT_MS,
+          "WhatsApp 媒体下载超时"
+        );
+      }
+    } catch (error) {
+      logger?.warn("WhatsApp 个人号下载媒体失败", error.message);
+      return null;
+    }
+
+    if (!Buffer.isBuffer(buffer) || !buffer.length) return null;
+    if (buffer.length > MAX_INBOUND_MEDIA_BYTES) {
+      logger?.warn(`WhatsApp 个人号媒体超过 ${MAX_INBOUND_MEDIA_BYTES} 字节，已跳过下载`);
+      return null;
+    }
+    const mimeType = content.meta.mimeType || "application/octet-stream";
+    const fileName = content.meta.fileName ||
+      `inbound-${Date.now()}${mediaExtension("", mimeType)}`;
+    return saveMediaFile("inbound-media", buffer, fileName, mimeType);
   }
 
   async function sendMedia(conversation, file, user, options = {}) {

@@ -1101,7 +1101,7 @@ function appendMessageContent(bubble, message) {
       image.className = "message-media";
       image.loading = "lazy";
       image.decoding = "async";
-      image.alt = meta.fileName || "Telegram 图片";
+      image.alt = meta.fileName || (channel === "whatsapp_web" ? "WhatsApp 图片" : "Telegram 图片");
       image.src = mediaUrl;
       image.addEventListener("click", () => window.open(mediaUrl, "_blank", "noopener,noreferrer"));
       bubble.appendChild(image);
