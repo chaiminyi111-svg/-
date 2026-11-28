@@ -100,6 +100,12 @@ test("WhatsApp Web helpers parse private JIDs and message types", () => {
   assert.equal(image.meta.mimeType, "image/png");
   assert.equal(contentOf({ message: { imageMessage: {} } }).body, "[图片]");
   assert.equal(contentOf({ message: { stickerMessage: {} } }).type, "sticker");
+  assert.equal(contentOf({
+    message: { viewOnceMessageV2: { message: { imageMessage: { mimetype: "image/jpeg" } } } }
+  }).type, "photo");
+  assert.equal(contentOf({
+    message: { ephemeralMessage: { message: { conversation: "临时消息" } } }
+  }).body, "临时消息");
 });
 
 test("WhatsApp Web reuses a stored session when Baileys leaves registered false", async () => {

@@ -137,8 +137,23 @@ function timestampOf(message) {
   return new Date(value).toISOString();
 }
 
+function unwrapMessageContent(payload) {
+  let current = payload;
+  for (let depth = 0; depth < 6; depth += 1) {
+    const next = current?.ephemeralMessage?.message ||
+      current?.viewOnceMessage?.message ||
+      current?.viewOnceMessageV2?.message ||
+      current?.viewOnceMessageV2Extension?.message ||
+      current?.documentWithCaptionMessage?.message ||
+      current?.editedMessage?.message;
+    if (!next) break;
+    current = next;
+  }
+  return current || {};
+}
+
 function contentOf(message) {
-  const payload = message?.message || {};
+  const payload = unwrapMessageContent(message?.message || {});
   const media = payload.imageMessage
     ? { type: "photo", value: payload.imageMessage, media: "image", mimeType: "image/jpeg", placeholder: "[图片]" }
     : payload.videoMessage
