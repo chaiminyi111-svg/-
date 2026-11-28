@@ -1091,7 +1091,10 @@ function appendMessageContent(bubble, message) {
   const body = String(message.body || "");
   const mediaUrl = `/api/messages/${encodeURIComponent(message.id)}/media`;
   const channel = state.active?.channel || "telegram";
+  const previewUrl = message.optimistic && typeof meta.previewUrl === "string" ? meta.previewUrl : "";
+  const mediaSource = previewUrl || mediaUrl;
   const canProxyMedia =
+    Boolean(previewUrl) ||
     (channel === "telegram" && state.telegramConfigured) ||
     (channel === "whatsapp_web" && Boolean(meta.localFile));
 
@@ -1102,8 +1105,8 @@ function appendMessageContent(bubble, message) {
       image.loading = "lazy";
       image.decoding = "async";
       image.alt = meta.fileName || (channel === "whatsapp_web" ? "WhatsApp 图片" : "Telegram 图片");
-      image.src = mediaUrl;
-      image.addEventListener("click", () => window.open(mediaUrl, "_blank", "noopener,noreferrer"));
+      image.src = mediaSource;
+      image.addEventListener("click", () => window.open(mediaSource, "_blank", "noopener,noreferrer"));
       bubble.appendChild(image);
     } else {
       bubble.appendChild(document.createTextNode("[图片]"));
@@ -1116,7 +1119,7 @@ function appendMessageContent(bubble, message) {
     if (canProxyMedia) {
       const link = document.createElement("a");
       link.className = "file-link";
-      link.href = mediaUrl;
+      link.href = mediaSource;
       link.download = meta.fileName || "telegram-file";
       link.textContent = "📎 " + (meta.fileName || "下载文件");
       bubble.appendChild(link);
@@ -1133,7 +1136,7 @@ function appendMessageContent(bubble, message) {
       audio.className = "audio-player";
       audio.controls = true;
       audio.preload = "none";
-      audio.src = mediaUrl;
+      audio.src = mediaSource;
       bubble.appendChild(audio);
     } else {
       bubble.appendChild(document.createTextNode(body || "[语音]"));
@@ -1148,7 +1151,7 @@ function appendMessageContent(bubble, message) {
       video.className = "video-player";
       video.controls = true;
       video.preload = "metadata";
-      video.src = mediaUrl;
+      video.src = mediaSource;
       bubble.appendChild(video);
     } else {
       bubble.appendChild(document.createTextNode(body || "[视频]"));
@@ -1163,7 +1166,7 @@ function appendMessageContent(bubble, message) {
       image.className = "message-media";
       image.loading = "lazy";
       image.alt = "贴纸";
-      image.src = mediaUrl;
+      image.src = mediaSource;
       bubble.appendChild(image);
     } else {
       bubble.appendChild(document.createTextNode(body || "[贴纸]"));
@@ -1829,9 +1832,23 @@ async function sendMessage() {
   }
 }
 
+function attachmentMessageType(file) {
+  const mimeType = String(file.type || "").toLowerCase();
+  if (mimeType.startsWith("image/")) return "photo";
+  if (mimeType.startsWith("video/")) return "video";
+  if (mimeType.startsWith("audio/")) return "audio";
+  const extension = String(file.name || "").split(".").pop().toLowerCase();
+  if (["png", "jpg", "jpeg", "gif", "webp", "bmp", "avif"].includes(extension)) return "photo";
+  if (["mp3", "wav", "ogg", "m4a", "aac", "opus"].includes(extension)) return "audio";
+  if (["mp4", "webm", "mov", "m4v"].includes(extension)) return "video";
+  return "document";
+}
+
 async function uploadAttachment(file) {
   if (!state.active || !file || state.uploading || state.sending) return;
-  const channel = state.active.channel || "telegram";
+  const conversation = state.active;
+  const conversationId = conversation.id;
+  const channel = conversation.channel || "telegram";
   if (!["telegram", "whatsapp_web"].includes(channel)) {
     showToast("当前渠道暂不支持出站附件", "error");
     return;
@@ -1844,15 +1861,43 @@ async function uploadAttachment(file) {
     showToast("文件不能超过 20MB", "error");
     return;
   }
-  const caption = $("#messageInput").value.trim();
+  const captionInput = $("#messageInput");
+  const caption = captionInput.value.trim();
   if (caption.length > 1024) {
     showToast("附件说明不能超过 1024 个字符", "error");
     return;
   }
 
-  const conversationId = state.active.id;
+  const type = attachmentMessageType(file);
+  const placeholder = { photo: "[图片]", video: "[视频]", audio: "[语音]", document: "[文件]" }[type];
+  const body = caption || (type === "document" && file.name ? `[文件] ${file.name}` : placeholder);
+  const tempId = `pending-media-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  const previewUrl = URL.createObjectURL(file);
   const button = $("#attachBtn");
+
   state.uploading = true;
+  state.messages.push({
+    id: tempId,
+    conversationId,
+    direction: "out",
+    senderId: state.me?.id,
+    senderName: state.me?.displayName || state.me?.username || "我",
+    body,
+    type,
+    meta: {
+      fileName: file.name || "file",
+      mimeType: file.type || "application/octet-stream",
+      previewUrl,
+      uploadSize: file.size
+    },
+    deliveryStatus: "sending",
+    createdAt: new Date().toISOString(),
+    optimistic: true
+  });
+  renderMessages({ scrollToBottom: true });
+  captionInput.value = "";
+  updateCharCount();
+  autoResize(captionInput);
   button.disabled = true;
   button.textContent = "上传中…";
   renderTelegramState();
@@ -1881,6 +1926,7 @@ async function uploadAttachment(file) {
       throw new ApiError(data.error || `上传失败（${response.status}）`, response.status);
     }
 
+    dropOptimisticMessage(tempId, conversationId);
     if (state.activeId === conversationId) {
       state.active = data.conversation;
       upsertConversation(data.conversation);
@@ -1889,14 +1935,24 @@ async function uploadAttachment(file) {
       renderChatHeader();
       renderConversationList();
       scheduleSidebarStats();
+    } else {
+      upsertConversation(data.conversation);
+      const cached = state.messageCache.get(conversationId);
+      if (cached) mergeMessage(cached.messages, data.message);
+      renderConversationList();
     }
-    $("#messageInput").value = "";
-    updateCharCount();
-    autoResize($("#messageInput"));
     showToast("附件已发送", "success");
   } catch (error) {
+    dropOptimisticMessage(tempId, conversationId);
+    if (state.activeId === conversationId && !captionInput.value.trim()) {
+      captionInput.value = caption;
+      updateCharCount();
+      autoResize(captionInput);
+    }
+    if (state.activeId === conversationId) renderMessages();
     showToast(error.message, "error");
   } finally {
+    URL.revokeObjectURL(previewUrl);
     state.uploading = false;
     $("#fileInput").value = "";
     button.textContent = "附件";
