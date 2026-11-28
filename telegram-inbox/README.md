@@ -332,15 +332,17 @@ TRUST_PROXY=true
 
 如果客户主要在 Snapchat，但 Snapchat 没有开放私信 API，可以把 Snapchat 当作引流入口：
 
-1. 在 `.env` 配置 WhatsApp 号码和/或 Telegram 机器人：
-   ```bash
-   SUPPORT_WHATSAPP_NUMBER=8613800138000
-   SUPPORT_TELEGRAM_BOT=your_support_bot
-   ```
-2. 重启服务后，把下面的链接放到 Snapchat 主页、Story 链接或广告落地页：
+1. 用管理员登录工作台，打开「渠道 → 客户页跳转」，填写 WhatsApp 号码和 Telegram 用户名。保存后立即生效，不需要重启。
+   - 也可以先在 `.env` 配置默认值，再在「渠道」页面覆盖：
+     ```bash
+     SUPPORT_WHATSAPP_NUMBER=8613800138000
+     SUPPORT_TELEGRAM_BOT=your_support_bot
+     ```
+2. 把下面的链接放到 Snapchat 主页、Story 链接或广告落地页：
+   - 客户页：`https://你的域名/`
    - 让客户选择渠道：`https://你的域名/go`
-   - 直接跳 WhatsApp：`https://你的域名/go?to=whatsapp`
-   - 直接跳 Telegram：`https://你的域名/go?to=telegram`
+   - 直接跳 WhatsApp：`https://你的域名/?to=whatsapp`
+   - 直接跳 Telegram：`https://你的域名/?to=telegram`
 
 客户点击后只会打开对应 App，不会自动填入或发送消息，仍需要自己点「发送」或「开始」。WhatsApp / Telegram 不允许第三方自动加好友或自动发送第一条消息。
 
@@ -405,9 +407,9 @@ TRUST_PROXY=true
 | `COOKIE_SECURE` | `auto` | `auto` / `true` / `false` |
 | `PUBLIC_ORIGIN` | 空 | 固定前端访问地址，用于 CSRF 同源校验 |
 | `MAX_MESSAGE_LENGTH` | `4096` | 单条回复最大字符数 |
-| `SUPPORT_WHATSAPP_NUMBER` | 空 | `/go` 落地页的 WhatsApp 号码，国际格式、只填数字 |
-| `SUPPORT_TELEGRAM_BOT` | 空 | `/go` 落地页的 Telegram 机器人用户名 |
-| `SUPPORT_TELEGRAM_USERNAME` | 空 | 没有机器人时可填普通 Telegram 用户名 |
+| `SUPPORT_WHATSAPP_NUMBER` | 空 | `/go` 落地页的 WhatsApp 号码默认值；可在「渠道 → 客户页跳转」覆盖 |
+| `SUPPORT_TELEGRAM_BOT` | 空 | `/go` 落地页的 Telegram 机器人用户名默认值；可在「渠道 → 客户页跳转」覆盖 |
+| `SUPPORT_TELEGRAM_USERNAME` | 空 | 没有机器人时的普通 Telegram 用户名默认值 |
 | `LOG_LEVEL` | `info` | `debug` / `info` / `warn` / `error` |
 
 ## 数据与备份

@@ -487,6 +487,39 @@ test("Telegram support inbox end-to-end API", async t => {
   const adminCookie = await login(base, "admin", "admin-pass-123");
   let conversationId;
 
+  await t.test("admin can change customer page links without restart", async () => {
+    const before = await apiRequest(base, "/api/admin/support-links", { cookie: adminCookie });
+    assert.equal(before.response.status, 200);
+    assert.equal(before.data.support.whatsappNumber, "8613800138000");
+    assert.equal(before.data.support.telegramTarget, "demo_support_bot");
+
+    const updated = await apiRequest(base, "/api/admin/support-links", {
+      method: "POST",
+      cookie: adminCookie,
+      body: {
+        whatsappNumber: "+86 139-0000-1111",
+        telegramTarget: "@new_support_bot"
+      }
+    });
+    assert.equal(updated.response.status, 200);
+    assert.equal(updated.data.support.whatsappNumber, "8613900001111");
+    assert.equal(updated.data.support.telegramTarget, "new_support_bot");
+    assert.equal(updated.data.support.whatsappUrl, "https://wa.me/8613900001111");
+    assert.equal(updated.data.support.telegramUrl, "https://t.me/new_support_bot");
+
+    const page = await apiRequest(base, "/go");
+    assert.equal(page.response.status, 200);
+    assert.match(page.data.raw, /https:\/\/wa\.me\/8613900001111/);
+    assert.match(page.data.raw, /https:\/\/t\.me\/new_support_bot/);
+
+    const invalid = await apiRequest(base, "/api/admin/support-links", {
+      method: "POST",
+      cookie: adminCookie,
+      body: { whatsappNumber: "abc", telegramTarget: "bad name" }
+    });
+    assert.equal(invalid.response.status, 400);
+  });
+
   await t.test("admin can list conversation and messages", async () => {
     const list = await apiRequest(base, "/api/conversations?scope=all&status=all", {
       cookie: adminCookie
@@ -556,6 +589,9 @@ test("Telegram support inbox end-to-end API", async t => {
     agent2Id = second.data.user.id;
 
     agent1Cookie = await login(base, "agent1", "agent-pass-1");
+
+    const denied = await apiRequest(base, "/api/admin/support-links", { cookie: agent1Cookie });
+    assert.equal(denied.response.status, 403);
   });
 
   await t.test("admin can create a read-only viewer account", async () => {

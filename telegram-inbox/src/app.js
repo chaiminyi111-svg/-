@@ -16,6 +16,7 @@ const {
   hashPassword
 } = require("./auth");
 const { audit } = require("./db");
+const { readSupportLinks, buildSupportLinks, saveSupportLinks } = require("./support-links");
 const { createAdminService } = require("./admin");
 const {
   generateTotpSecret,
@@ -525,6 +526,24 @@ function createApp({ db, config, telegram, whatsapp, whatsappWeb, accounts, broa
     });
     audit(db, req.user.id, "assignment.settings_updated", "settings", "assignment", JSON.stringify(settings));
     res.json({ assignment: settings });
+  });
+
+  app.get("/api/admin/support-links", requireAdmin, (req, res) => {
+    res.json({ support: buildSupportLinks(readSupportLinks(db, config)) });
+  });
+
+  app.post("/api/admin/support-links", requireAdmin, (req, res) => {
+    try {
+      const support = saveSupportLinks(db, req.body || {});
+      audit(db, req.user.id, "support.links_updated", "settings", "support", JSON.stringify({
+        whatsappNumber: support.whatsappNumber,
+        telegramTarget: support.telegramTarget
+      }));
+      res.json({ support });
+    } catch (error) {
+      if (error.code === "VALIDATION") return jsonError(res, 400, error.message);
+      throw error;
+    }
   });
 
   app.get("/api/admin/translate", requireAdmin, (req, res) => {
@@ -1672,13 +1691,7 @@ function createApp({ db, config, telegram, whatsapp, whatsappWeb, accounts, broa
   });
 
   app.get("/go", (req, res) => {
-    const whatsappNumber = String(config.supportWhatsAppNumber || "").replace(/\D/g, "");
-    const telegramBot = String(config.supportTelegramBot || "").replace(/^@/, "").replace(/[^A-Za-z0-9_]/g, "");
-    const telegramUsername = String(config.supportTelegramUsername || "").replace(/^@/, "").replace(/[^A-Za-z0-9_]/g, "");
-    const whatsappUrl = whatsappNumber ? `https://wa.me/${whatsappNumber}` : "";
-    const telegramUrl = telegramBot || telegramUsername
-      ? `https://t.me/${telegramBot || telegramUsername}`
-      : "";
+    const { whatsappUrl, telegramUrl } = buildSupportLinks(readSupportLinks(db, config));
 
     res.setHeader("Cache-Control", "no-store");
     res.setHeader("X-Robots-Tag", "noindex");

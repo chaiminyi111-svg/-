@@ -526,6 +526,49 @@
         <button class="ghost" type="button" id="channelsAppearanceBtn">选择主题</button>
       </div>
 
+      <div class="channel-status" id="supportLinksStatus">
+        <span class="channel-dot on" aria-hidden="true"></span>
+        <div>
+          <strong>客户页跳转</strong>
+          <span id="supportLinksStatusText">客户打开 /go 时使用的 WhatsApp 和 Telegram 账号</span>
+        </div>
+        <button class="ghost" type="button" id="supportLinksPreviewBtn">预览客户页</button>
+      </div>
+
+      <form id="supportLinksForm" class="channel-form">
+        <label>
+          WhatsApp 号码
+          <input
+            id="supportWhatsappInput"
+            type="text"
+            inputmode="tel"
+            autocomplete="off"
+            spellcheck="false"
+            placeholder="国际格式，只填数字，例如 8617350578910"
+            maxlength="30"
+          >
+        </label>
+        <label>
+          Telegram 用户名
+          <input
+            id="supportTelegramInput"
+            type="text"
+            autocomplete="off"
+            spellcheck="false"
+            placeholder="例如 Ricky0099887bot，不需要 @"
+            maxlength="40"
+          >
+        </label>
+        <p class="channel-note">保存后立即生效，不需要重启服务。这里修改的是客户页按钮的跳转账号；留空则隐藏对应按钮。</p>
+        <div class="channel-note" id="supportLinksPreview">正在读取当前账号…</div>
+        <div class="channel-actions">
+          <button class="primary" type="submit" id="supportLinksSaveBtn">保存客户页账号</button>
+        </div>
+        <div id="supportLinksError" class="form-error" hidden></div>
+      </form>
+
+      <div class="channel-divider"></div>
+
       <div class="channel-status" id="channelStatus">
         <span class="channel-dot" id="channelDot" aria-hidden="true"></span>
         <div>

@@ -2702,6 +2702,58 @@ async function loadChannelSettings() {
   renderTelegramState();
 }
 
+function renderSupportLinksPreview(support = {}) {
+  const lines = [];
+  if (support.whatsappUrl) lines.push(`WhatsApp: ${support.whatsappUrl}`);
+  if (support.telegramUrl) lines.push(`Telegram: ${support.telegramUrl}`);
+  $("#supportLinksPreview").textContent = lines.length
+    ? lines.join("  ·  ")
+    : "当前未设置客户页跳转账号。";
+}
+
+async function loadSupportLinks() {
+  setChannelError("supportLinksError", "");
+  $("#supportLinksPreview").textContent = "正在读取当前账号…";
+  try {
+    const data = await api("/api/admin/support-links");
+    const support = data.support || {};
+    $("#supportWhatsappInput").value = support.whatsappNumber || "";
+    $("#supportTelegramInput").value = support.telegramTarget || "";
+    renderSupportLinksPreview(support);
+  } catch (error) {
+    setChannelError("supportLinksError", error.message);
+    $("#supportLinksPreview").textContent = "读取失败";
+  }
+}
+
+async function saveSupportLinks(event) {
+  event.preventDefault();
+  const button = $("#supportLinksSaveBtn");
+  const payload = {
+    whatsappNumber: $("#supportWhatsappInput").value.trim(),
+    telegramTarget: $("#supportTelegramInput").value.trim()
+  };
+  button.disabled = true;
+  button.textContent = "保存中…";
+  setChannelError("supportLinksError", "");
+  try {
+    const data = await api("/api/admin/support-links", {
+      method: "POST",
+      body: payload
+    });
+    const support = data.support || {};
+    $("#supportWhatsappInput").value = support.whatsappNumber || "";
+    $("#supportTelegramInput").value = support.telegramTarget || "";
+    renderSupportLinksPreview(support);
+    showToast("客户页账号已保存，立即生效", "success");
+  } catch (error) {
+    setChannelError("supportLinksError", error.message);
+  } finally {
+    button.disabled = false;
+    button.textContent = "保存客户页账号";
+  }
+}
+
 async function openChannelsModal() {
   if (state.me?.role !== "admin") return;
   stopWhatsAppWebPolling();
@@ -2734,7 +2786,7 @@ async function openChannelsModal() {
   setChannelError("whatsappWebError", "");
   setChannelError("translateError", "");
   setChannelError("aiError", "");
-  await loadChannelSettings();
+  await Promise.all([loadChannelSettings(), loadSupportLinks()]);
 }
 
 async function saveTelegramToken(event) {
@@ -3381,6 +3433,7 @@ const AUDIT_LABELS = {
   "account.reconnected": "重连个人号",
   "message.recalled": "撤回消息",
   "message.deleted": "删除消息",
+  "support.links_updated": "修改客户页跳转账号",
   "telegram.token_updated": "修改 Telegram 渠道",
   "telegram.token_cleared": "清除 Telegram 渠道",
   "telegram.token_tested": "测试 Telegram Token",
@@ -4388,6 +4441,8 @@ function bindEvents() {
     if (state.active?.assigneeId === state.me?.id) openAiModal();
   });
 
+  $("#supportLinksForm").addEventListener("submit", saveSupportLinks);
+  $("#supportLinksPreviewBtn").addEventListener("click", () => window.open("/go", "_blank", "noopener"));
   $("#telegramForm").addEventListener("submit", saveTelegramToken);
   $("#telegramClearBtn").addEventListener("click", clearTelegramToken);
   $("#whatsappForm").addEventListener("submit", saveWhatsAppCredentials);
