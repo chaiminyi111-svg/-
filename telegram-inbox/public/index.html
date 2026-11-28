@@ -102,9 +102,12 @@
             <span id="sidebarStatsHint">全团队</span>
           </div>
           <div class="sidebar-stats-grid">
-            <div><strong id="sidebarIncoming">0</strong><span>进人</span></div>
-            <div><strong id="sidebarActive">0</strong><span>接待</span></div>
-            <div><strong id="sidebarUnread">0</strong><span>未读</span></div>
+            <div title="今日新进客户会话"><strong id="sidebarIncoming">0</strong><span>进人</span></div>
+            <div title="当前分配给我的会话"><strong id="sidebarActive">0</strong><span>接待</span></div>
+            <div title="客户发来且未读的消息"><strong id="sidebarUnread">0</strong><span>未读</span></div>
+            <div title="当前待处理会话"><strong id="sidebarOpen">0</strong><span>待处理</span></div>
+            <div title="今日平均首次响应时间"><strong id="sidebarFirstResponse">—</strong><span>平均首响</span></div>
+            <div title="今日首次响应超过 SLA 的会话"><strong id="sidebarSla">0</strong><span>SLA超时</span></div>
           </div>
           <div id="sidebarAgentRows" class="sidebar-agent-rows"></div>
         </section>
@@ -270,7 +273,11 @@
         </label>
       </div>
 
-      <div id="viewerCards" class="stats-cards"></div>
+      <div class="viewer-kpi-head">
+        <span class="section-label">数据概览</span>
+        <span id="viewerRangeHint">今日</span>
+      </div>
+      <div id="viewerCards" class="stats-cards viewer-kpis"></div>
 
       <section class="stats-section viewer-table-section">
         <div class="stats-section-head">

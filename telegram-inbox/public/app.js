@@ -757,14 +757,11 @@ function renderConversationList() {
     meta.className = "conversation-meta";
     const channel = document.createElement("span");
     channel.className = "channel-chip " + (conversation.channel || "telegram");
-    channel.textContent = conversation.accountId
-      ? (conversation.channel === "whatsapp_web" ? "WA·个人" : "TG·个人")
-      : conversation.channel === "whatsapp"
-        ? "WA"
-        : conversation.channel === "whatsapp_web" ? "WAW" : "TG";
+    channel.textContent = channelLabel(conversation.channel);
     channel.title = conversation.accountId
       ? `${channelLabel(conversation.channel)} · ${conversation.accountLabel || conversation.accountName || "个人号"}`
-      : channelLabel(conversation.channel);
+      : `客户渠道：${channelLabel(conversation.channel)}`;
+    channel.setAttribute("aria-label", channel.title);
     meta.appendChild(channel);
     if (conversation.accountId && state.me.role === "admin" && conversation.accountOwnerName) {
       const owner = document.createElement("span");
@@ -1407,6 +1404,12 @@ function renderTelegramState() {
   input.placeholder = configured
     ? "输入回复，Enter 发送，Shift + Enter 换行"
     : `未配置 ${label} 凭据，暂时无法发送`;
+  const hint = $("#composerHint");
+  if (hint) {
+    hint.textContent = channel === "telegram"
+      ? "Enter 发送 · Shift + Enter 换行 · 可直接粘贴图片"
+      : "Enter 发送 · Shift + Enter 换行";
+  }
 }
 
 async function updateConversation(payload) {
@@ -1922,12 +1925,20 @@ function renderSidebarStats() {
     .sort((a, b) => b.newConversations - a.newConversations || b.assigned - a.assigned);
 
   const own = agents[0] || {};
-  $("#sidebarIncoming").textContent = Number(isAdmin ? stats.totals.newConversations : own.newConversations || 0)
-    .toLocaleString("zh-CN");
-  $("#sidebarActive").textContent = Number(isAdmin ? stats.totals.assigned : own.assigned || 0)
-    .toLocaleString("zh-CN");
-  $("#sidebarUnread").textContent = Number(isAdmin ? stats.totals.unread : own.unread || 0)
-    .toLocaleString("zh-CN");
+  const summary = isAdmin ? stats.totals : own;
+  const unread = Number(summary.unread || 0);
+  const open = Number(summary.open || 0);
+  const slaBreaches = Number(summary.slaBreaches || 0);
+
+  $("#sidebarIncoming").textContent = Number(summary.newConversations || 0).toLocaleString("zh-CN");
+  $("#sidebarActive").textContent = Number(summary.assigned || 0).toLocaleString("zh-CN");
+  $("#sidebarUnread").textContent = unread.toLocaleString("zh-CN");
+  $("#sidebarUnread").classList.toggle("danger", unread > 0);
+  $("#sidebarOpen").textContent = open.toLocaleString("zh-CN");
+  $("#sidebarOpen").classList.toggle("danger", open > 0);
+  $("#sidebarFirstResponse").textContent = formatMinutes(summary.avgFirstResponseMinutes);
+  $("#sidebarSla").textContent = slaBreaches.toLocaleString("zh-CN");
+  $("#sidebarSla").classList.toggle("danger", slaBreaches > 0);
   $("#sidebarStatsHint").textContent = isAdmin ? "全团队 · 今日" : "我的 · 今日";
   $("#sidebarStats").classList.toggle("agent", !isAdmin);
 
@@ -1939,7 +1950,7 @@ function renderSidebarStats() {
     const name = document.createElement("strong");
     name.textContent = agent.displayName;
     const value = document.createElement("span");
-    value.textContent = `进人 ${agent.newConversations} · 接待 ${agent.assigned}`;
+    value.textContent = `进人 ${agent.newConversations} · 接待 ${agent.assigned} · 待处理 ${agent.open}`;
     row.append(name, value);
     rows.appendChild(row);
   }
@@ -1994,6 +2005,7 @@ async function loadViewerStats() {
     $("#viewerSubtitle").textContent = days === 1
       ? "只读统计账号 · 今日数据 · 不显示客户会话内容。"
       : `只读统计账号 · 最近 ${days} 天 · 不显示客户会话内容。`;
+    $("#viewerRangeHint").textContent = rangeLabel(days);
   } catch (error) {
     showToast(error.message, "error");
   }
@@ -2041,9 +2053,9 @@ function renderStats() {
   for (const cardBox of [$("#statsCards"), $("#viewerCards")]) {
     if (!cardBox) continue;
     cardBox.replaceChildren();
-    for (const [label, value, hint] of cards) {
+    cards.forEach(([label, value, hint], index) => {
       const item = document.createElement("div");
-      item.className = "stats-card-item";
+      item.className = "stats-card-item" + (index < 4 ? " primary" : "");
       const name = document.createElement("span");
       name.textContent = label;
       const number = document.createElement("strong");
@@ -2052,7 +2064,7 @@ function renderStats() {
       note.textContent = hint;
       item.append(name, number, note);
       cardBox.appendChild(item);
-    }
+    });
   }
 
   const chart = $("#statsChart");
@@ -4340,6 +4352,31 @@ function autoResize(element) {
   element.style.height = Math.min(element.scrollHeight, 150) + "px";
 }
 
+function clipboardImageFile(event) {
+  const data = event.clipboardData;
+  if (!data) return null;
+  for (const item of Array.from(data.items || [])) {
+    if (item.kind !== "file" || !String(item.type || "").startsWith("image/")) continue;
+    const file = item.getAsFile();
+    if (file) return file;
+  }
+  return Array.from(data.files || []).find(file => String(file.type || "").startsWith("image/")) || null;
+}
+
+function handlePastedImage(event) {
+  const file = clipboardImageFile(event);
+  if (!file || !state.active) return;
+  const target = event.target;
+  if (target instanceof HTMLElement) {
+    if (target.closest(".modal")) return;
+    if (target.closest("input, textarea") && target.id !== "messageInput") return;
+  }
+  event.preventDefault();
+  const ext = String(file.type.split("/")[1] || "png").replace("jpeg", "jpg");
+  const name = file.name || `粘贴图片-${Date.now()}.${ext}`;
+  void uploadAttachment(new File([file], name, { type: file.type || "image/png" }));
+}
+
 /* ---------- Events ---------- */
 function bindEvents() {
   $("#loginForm").addEventListener("submit", async event => {
@@ -4508,6 +4545,7 @@ function bindEvents() {
   });
   input.addEventListener("compositionstart", () => { state.composing = true; });
   input.addEventListener("compositionend", () => { state.composing = false; });
+  document.addEventListener("paste", handlePastedImage);
   input.addEventListener("keydown", event => {
     if (event.key === "Enter" && !event.shiftKey && !state.composing && !event.isComposing) {
       event.preventDefault();

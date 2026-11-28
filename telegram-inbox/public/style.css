@@ -3135,3 +3135,61 @@ input:focus, select:focus, textarea:focus {
 .delivery-status.sending {
   color: var(--muted);
 }
+
+/* ---------- Visible channel labels and panel KPIs ---------- */
+.channel-chip {
+  gap: 4px;
+  height: 18px;
+  padding: 0 6px;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0;
+  white-space: nowrap;
+}
+
+.channel-chip::before {
+  content: "";
+  width: 5px;
+  height: 5px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.channel-chip.telegram_user {
+  background: #eef0ff;
+  color: #4f5bd5;
+}
+
+:root[data-theme] .channel-chip.telegram_user {
+  background: rgba(99, 102, 241, .16);
+  color: #a5b4fc;
+}
+
+.sidebar-stats-grid strong.danger {
+  color: #c0392b;
+}
+
+.viewer-kpi-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 2px 2px -4px;
+}
+
+#viewerRangeHint {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.viewer-view .stats-card-item.primary {
+  border-color: #cfe7f5;
+  background: linear-gradient(160deg, #f2fbff, #eaf6fd);
+  box-shadow: 0 7px 20px rgba(23, 48, 73, .06);
+}
+
+.viewer-view .stats-card-item.primary strong {
+  color: var(--tg-dark);
+  font-size: 26px;
+}
